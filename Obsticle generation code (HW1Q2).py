@@ -11,14 +11,26 @@ from enum import Enum
 
 
 # Configuration for 128x128
-GRID_SIZE = 128
-CELL_SIZE = 10
-FILL_PERCENT = 0.1 
+GRID_SIZE = 64
+CELL_SIZE = 20
+FILL_PERCENT = 0.7
 
 
 #Establishing list to track all filled coordinates and total trials to stop endless loop.
 Obstacle_Coordinate_List = [] #holds all the current shaded coordinates
 total_trails = 0
+
+
+
+def draw_128_grid(canvas): 
+    """This function creates a canvas of size 128 x 128"""
+    max_dim = GRID_SIZE * CELL_SIZE
+    # Draw Vertical Lines
+    for x in range(0, max_dim + CELL_SIZE, CELL_SIZE):
+        canvas.create_line(x, 0, x, max_dim, fill="lightgray")
+    # Draw Horizontal Lines
+    for y in range(0, max_dim + CELL_SIZE, CELL_SIZE):
+        canvas.create_line(0, y, max_dim, y, fill="lightgray")
 
 #definitions of shapes for interpretations
 THREE_TALL = 1
@@ -32,55 +44,78 @@ def generate_random_tetromino():
     shape = random.choice([1,2,3,4])
     return shape
 
-def determine_open_location():
+def generate_random_coord():
+    """This function creates a random coordinate within the grid"""
+    # 1. Create a list of all 16,384 possible (row, col) pairs
+    all_coords = [(row, column) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
+
+    # 2. Pick unique pairs automatically
+    return random.sample(all_coords, 1)
+
+def determine_open_square():
     """This function uses a random coordinate and shape to determine if they would fit into the obstacle board's boundaries"""
     new_coordinate = generate_random_coord()
-    x_cord = new_coordinate[0][0]
-    y_cord = new_coordinate[0][1]
-    shape = generate_random_tetromino()
+    if(new_coordinate in Obstacle_Coordinate_List):
+        determine_open_square()
+    else:
+        return new_coordinate
+    
+
+def generate_field_obstacle(shape, attempts):
+    if attempts > 1000:
+        return True
+    coordinate = determine_open_square()
+    x_cord = coordinate[0][0]
+    y_cord = coordinate[0][1]
     coord_list = []
     if(shape == THREE_TALL): #boundary check for each shape
         if(y_cord + 1 <= 128 and y_cord - 1 >= 0):
             above_cord = (x_cord, y_cord - 1)
             below_cord = (x_cord, y_cord + 1)
-            coord_list = [above_cord, below_cord]
-            coord_list.append((x_cord,y_cord))          
+            if(above_cord in Obstacle_Coordinate_List or below_cord in Obstacle_Coordinate_List):
+                generate_field_obstacle(shape, attempts+1)
+            else:
+                coord_list = [above_cord, below_cord]
+                coord_list.append((x_cord,y_cord))          
 
     elif(shape == UPSIDEDOWN_L): 
         if(x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128):
             left_cord = (x_cord - 1 , y_cord - 1)
             above_cord = (x_cord, y_cord - 1)
             below_cord = (x_cord, y_cord + 1)
-            coord_list = [left_cord,above_cord,below_cord]
-            coord_list.append((x_cord,y_cord))
+            if(left_cord in Obstacle_Coordinate_List or above_cord in Obstacle_Coordinate_List or below_cord in Obstacle_Coordinate_List):
+                generate_field_obstacle(shape, attempts+1)
+            else:
+                coord_list = [left_cord,above_cord,below_cord]
+                coord_list.append((x_cord,y_cord))
 
     elif(shape == TETRIS):
         if(x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128):
             top_left_cord = (x_cord - 1 , y_cord - 1)
             left_cord = (x_cord - 1, y_cord )
             below_cord = (x_cord , y_cord + 1)
-            coord_list = [top_left_cord,left_cord,below_cord]
-            coord_list.append((x_cord,y_cord))
+            if(left_cord in Obstacle_Coordinate_List or top_left_cord in Obstacle_Coordinate_List or below_cord in Obstacle_Coordinate_List):
+                generate_field_obstacle(shape, attempts+1)
+            else:
+                coord_list = [top_left_cord,left_cord,below_cord]
+                coord_list.append((x_cord,y_cord))
 
     elif(shape == HALF_PLUS):
         if(x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128):
             above_cord = (x_cord, y_cord - 1)
             below_cord = (x_cord, y_cord + 1)
             left_cord = (x_cord - 1, y_cord )
-            coord_list = [above_cord, below_cord, left_cord]
-            coord_list.append((x_cord,y_cord))
+            if(above_cord in Obstacle_Coordinate_List or below_cord in Obstacle_Coordinate_List or left_cord in Obstacle_Coordinate_List):
+                generate_field_obstacle(shape, attempts+1)
+            else:
+                coord_list = [above_cord, below_cord, left_cord]
+                coord_list.append((x_cord,y_cord))
 
-    return coord_list
+    for coordinate in coord_list:
+            Obstacle_Coordinate_List.append(coordinate)
+            color_cell(canvas,coordinate[1],coordinate[0])
+    return False
 
-def draw_128_grid(canvas): 
-    """This function creates a canvas of size 128 x 128"""
-    max_dim = GRID_SIZE * CELL_SIZE
-    # Draw Vertical Lines
-    for x in range(0, max_dim + CELL_SIZE, CELL_SIZE):
-        canvas.create_line(x, 0, x, max_dim, fill="lightgray")
-    # Draw Horizontal Lines
-    for y in range(0, max_dim + CELL_SIZE, CELL_SIZE):
-        canvas.create_line(0, y, max_dim, y, fill="lightgray")
 
 def color_cell(canvas, row, col, color="black"):
     """This function colors the cells of the canvas"""
@@ -91,34 +126,12 @@ def color_cell(canvas, row, col, color="black"):
         x2 = x1 + CELL_SIZE
         y2 = y1 + CELL_SIZE
         canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="lightgray")
-
-def generate_random_coord():
-    """This function creates a random coordinate within the grid"""
-    # 1. Create a list of all 16,384 possible (row, col) pairs
-    all_coords = [(row, column) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
-
-    # 2. Pick unique pairs automatically
-    return random.sample(all_coords, 1)
-    
-def check_for_open_cells():
-    """This function checks that the shape doesn't overlap with any other existing shape in that area"""
-    new_coordinates = determine_open_location()
-    is_space_clear = True
-    for coordinate in new_coordinates:
-        if coordinate in Obstacle_Coordinate_List:
-            is_space_clear = False
-    
-    if is_space_clear == True:
-        for coordinate in new_coordinates:
-            Obstacle_Coordinate_List.append(coordinate)
-            color_cell(canvas,coordinate[1],coordinate[0])
-            
             
     
 
 
 root = tk.Tk()
-root.title("128x128 Math Grid")
+root.title("The Hero's Jounery")
 
 # Create a canvas large enough for 128 cells
 canvas_dim = GRID_SIZE * CELL_SIZE
@@ -127,18 +140,9 @@ canvas.pack(padx=10, pady=10)
 
 # Draw the 128x128 lines
 draw_128_grid(canvas)
-#color_cell(canvas, 10, 10)    # Row 10, Col 10
-#color_cell(canvas, 64, 64)    # The middle cell
-#color_cell(canvas, 127, 127)  # Bottom-right cell
-print(generate_random_coord())
-# Example usage
-tetromino = generate_random_tetromino()
-print(tetromino)
 while len(Obstacle_Coordinate_List) < GRID_SIZE*GRID_SIZE*FILL_PERCENT:
-    check_for_open_cells()
-    total_trails = total_trails + 1
-    if(total_trails > 10000):
-        print("no open space") #prevents infinite attempts if the shapes geometry doesn't mesh well. Useful at higher infill percentages. 
+    if generate_field_obstacle(generate_random_tetromino(), 0):
+        print("too many attempts")
         break
 
 root.mainloop()
