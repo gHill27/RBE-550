@@ -8,6 +8,7 @@ import random
 
 from enum import Enum
 
+
 class Map:
 
     def __init__(self,Grid_num,cell_size,fill_percent):
@@ -15,8 +16,9 @@ class Map:
         self.cell_size = cell_size
         self.fill_percent = fill_percent
         self.obstacle_coordinate_list = []
+        self.goal_pos = (-1,-1) #to be updated 
         self.enemy_coordinate_list = []
-        self.hero_coordinate = (0,0)
+        self.hero_coordinate = (-1,-1) #to be updated
         self.root = tk.Tk()
         self.root.title("The Hero's Jounery")
 
@@ -54,14 +56,39 @@ class Map:
         # 2. Pick unique pairs automatically
         return random.sample(all_coords, 1)
 
-    def determine_open_square(self):
+    def find_open_square(self):
         """This function uses a random coordinate and shape to determine if they would fit into the obstacle board's boundaries"""
         new_coordinate = self.generate_random_coord()
-        if(new_coordinate in self.obstacle_coordinate_list):
-            self.determine_open_square()
+        if(new_coordinate in self.obstacle_coordinate_list or new_coordinate in self.enemy_coordinate_list or new_coordinate == self.hero_coordinate or new_coordinate == self.goal_pos):
+            self.find_open_square()
         else:
-            return new_coordinate
+            return new_coordinate[0]
+
+    def generate_goal(self):
+        if self.goal_pos == (-1,-1):
+            self.goal_pos = self.find_open_square()
+            self.color_cell(self.canvas, self.goal_pos[1], self.goal_pos[0], "green")
     
+    def random_adjacent_cell(self,position):
+        row, col = position
+
+        possible_moves = [
+            (-1, -1), (-1, 0), (-1, 1),
+            ( 0, -1),          ( 0, 1),
+            ( 1, -1), ( 1, 0), ( 1, 1)
+        ]
+
+        valid_cells = []
+
+        for x, y in possible_moves:
+            new_row = row + x
+            new_col = col + y
+
+            if 0 <= new_row < self.grid_num and 0 <= new_col < self.grid_num:
+                valid_cells.append((new_row, new_col))
+
+        return random.choice(valid_cells)
+
     def generate_field_obstacle(self, shape, attempts):
         THREE_TALL = 1
         UPSIDEDOWN_L = 2
@@ -69,9 +96,9 @@ class Map:
         HALF_PLUS = 4
         if attempts > 1000:
             return True
-        coordinate = self.determine_open_square()
-        x_cord = coordinate[0][0]
-        y_cord = coordinate[0][1]
+        coordinate = self.find_open_square()
+        x_cord = coordinate[0]
+        y_cord = coordinate[1]
         coord_list = []
         if(shape == THREE_TALL): #boundary check for each shape
             if(y_cord + 1 <= 128 and y_cord - 1 >= 0):
@@ -150,7 +177,6 @@ class Map:
                     outline="lightgray"
                 )
 
-
             elif shape == "circle":
                 padding = self.cell_size * 0.1
                 canvas.create_oval(
@@ -163,11 +189,12 @@ class Map:
     def remove_previous_enities(self):
         #removes previous enemy positions
         for coordinate in self.enemy_coordinate_list:
-            self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
+            if coordinate not in self.obstacle_coordinate_list:
+                self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
         self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"white")
 
 
-    def update_characters(self, enemy_list:list, hero_position:tuple):
+    def update_characters(self, enemy_coordinate_list:list, hero_postion):
         """
         Updates enemy and hero position and updates the current list
 
@@ -175,10 +202,12 @@ class Map:
         
         """
         self.remove_previous_enities()
-        for enemy in enemy_list:
-            self.color_cell(self.canvas, enemy.coordinate[1], enemy.coordinate[0], "red", "triangle")
-        self.color_cell(self.canvas,hero_position[1], hero_position[0], "black", "circle")
-        pass
+        self.enemy_coordinate_list = enemy_coordinate_list
+        self.hero_coordinate = hero_postion
+        for enemy_coordinate in enemy_coordinate_list:
+            self.color_cell(self.canvas, enemy_coordinate[1], enemy_coordinate[0], "red", "triangle")
+        self.color_cell(self.canvas, hero_postion[1], hero_postion[0], "black", "circle")
+        
 
 
     def Fill_map(self):
@@ -188,6 +217,7 @@ class Map:
             if self.generate_field_obstacle(self.generate_random_tetromino(), 0):
                 print("too many attempts")
                 break
+
     def Open_map(self):
         self.root.mainloop()
 
