@@ -4,7 +4,7 @@ from Characters import Enemy
 from Characters import Hero
 
 #create map
-map1 = Map(64,20,0.2)
+map1 = Map(30,30,0.2)
 map1.Fill_map()
 
 #enemy generation function

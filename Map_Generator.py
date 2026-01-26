@@ -69,7 +69,7 @@ class Map:
             self.goal_pos = self.find_open_square()
             self.color_cell(self.canvas, self.goal_pos[1], self.goal_pos[0], "green")
     
-    def random_adjacent_cell(self,position):
+    def Move_enemy_cell(self,position):
         row, col = position
 
         possible_moves = [
@@ -78,16 +78,22 @@ class Map:
             ( 1, -1), ( 1, 0), ( 1, 1)
         ]
 
-        valid_cells = []
+        best = None
+        best_distance = 100000000.0
 
         for x, y in possible_moves:
             new_row = row + x
             new_col = col + y
 
             if 0 <= new_row < self.grid_num and 0 <= new_col < self.grid_num:
-                valid_cells.append((new_row, new_col))
-
-        return random.choice(valid_cells)
+                distance = abs(self.hero_coordinate[0] - new_row) + abs(self.hero_coordinate[1] - new_col)
+                if distance < best_distance:
+                    best_distance = distance
+                    best = (new_row,new_col)
+        if best:                    
+            return best
+        else:
+            return "error! no distance could be specified"
 
     def generate_field_obstacle(self, shape, attempts):
         THREE_TALL = 1

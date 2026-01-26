@@ -22,7 +22,7 @@ class Enemy(Character):
         self.map.enemy_coordinate_list.append(self.coordinate)
     
     def move(self):
-        next_point = self.map.random_adjacent_cell(self.coordinate)
+        next_point = self.map.Move_enemy_cell(self.coordinate)
         if self.check_collision():
             self.become_obstacle()
         else:
