@@ -15,6 +15,8 @@ class Map:
         self.cell_size = cell_size
         self.fill_percent = fill_percent
         self.obstacle_coordinate_list = []
+        self.enemy_coordinate_list = []
+        self.hero_coordinate = (0,0)
         self.root = tk.Tk()
         self.root.title("The Hero's Jounery")
 
@@ -22,6 +24,11 @@ class Map:
         self.canvas_dim = self.grid_num * self.cell_size
         self.canvas = tk.Canvas(self.root, width=self.canvas_dim, height=self.canvas_dim, bg="white")
         self.canvas.pack(padx=10, pady=10)
+
+    def append_new_obstacle(self,coordinate):
+        self.obstacle_coordinate_list.append(coordinate)
+        self.color_cell(self.canvas,coordinate[1],coordinate[0])
+
 
     def draw_128_grid(self,canvas): 
         """This function creates a canvas of size 128 x 128"""
@@ -38,7 +45,6 @@ class Map:
         """This function generates a random number between 1 - 4 that is associated to a shape"""
         shape = random.choice([1,2,3,4])
         return shape
-
 
     def generate_random_coord(self):
         """This function creates a random coordinate within the grid"""
@@ -115,30 +121,65 @@ class Map:
                 self.color_cell(self.canvas,coordinate[1],coordinate[0])
         return False
 
-    def color_cell(self, canvas, row, col, color="black"):
-        """This function colors the cells of the canvas"""
-        # Ensure coordinates are within 128x128 bounds
+    def color_cell(self, canvas, row, col, color="black", shape="square"):
+        """Color a cell with a specific shape"""
+
         if 0 <= row < self.grid_num and 0 <= col < self.grid_num:
             x1 = col * self.cell_size
             y1 = row * self.cell_size
             x2 = x1 + self.cell_size
             y2 = y1 + self.cell_size
-            canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="lightgray")
-    
-    def generate_hero():
+
+            if shape == "square":
+                canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill=color,
+                    outline="lightgray"
+                )
+
+            elif shape == "triangle":
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                size = self.cell_size * 0.4  # controls how big the triangle is
+
+                canvas.create_polygon(
+                    cx, cy - size,          # top
+                    cx - size, cy + size,   # bottom-left
+                    cx + size, cy + size,   # bottom-right
+                    fill=color,
+                    outline="lightgray"
+                )
+
+
+            elif shape == "circle":
+                padding = self.cell_size * 0.1
+                canvas.create_oval(
+                    x1 + padding, y1 + padding,
+                    x2 - padding, y2 - padding,
+                    fill=color,
+                    outline="lightgray"
+                )
+
+    def remove_previous_enities(self):
+        #removes previous enemy positions
+        for coordinate in self.enemy_coordinate_list:
+            self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
+        self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"white")
+
+
+    def update_characters(self, enemy_list:list, hero_position:tuple):
+        """
+        Updates enemy and hero position and updates the current list
+
+        Should run every loop call to ensure proper display
+        
+        """
+        self.remove_previous_enities()
+        for enemy in enemy_list:
+            self.color_cell(self.canvas, enemy.coordinate[1], enemy.coordinate[0], "red", "triangle")
+        self.color_cell(self.canvas,hero_position[1], hero_position[0], "black", "circle")
         pass
 
-    def generate_enemies():
-        pass
-
-    def move_enemies():
-        pass
-
-    def generate_goal():
-        pass
-
-    def teleport_hero():
-        pass
 
     def Fill_map(self):
         # Draw the 128x128 lines
@@ -151,10 +192,6 @@ class Map:
         self.root.mainloop()
 
     
-map1 = Map(64,20,0.2)
-map1.Fill_map()
-map1.Open_map()
-
 
 
 
