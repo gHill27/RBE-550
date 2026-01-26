@@ -54,22 +54,32 @@ class Hero(Character):
         if self.teleport_counter < 5:
             self.coordinate = self.map.find_open_square()
             self.teleport_counter = self.teleport_counter + 1
+            self.reset_trail()
+    
+    def reset_trail(self):
+        for square in self.visited_squares:
+            self.map.color_cell(self.map.canvas, square[1], square[0], "white")
+            self.map.color_cell(self.map.canvas, self.map.goal_pos[1], self.map.goal_pos[0], "green")
+        self.visited_squares = []
+        self.stack = []
 
     def visit(self,coordinate_to_visit):
         retval = False
-        self.visited_squares.append(coordinate_to_visit)
-        if self.check_at_goal(coordinate_to_visit): 
-            retval = True ##################################### Fill in return algorithm here
-        else: 
-            self.determine_next_neighbor(coordinate_to_visit)
-        self.move(coordinate_to_visit)
+        if coordinate_to_visit not in self.visited_squares:    
+            self.visited_squares.append(coordinate_to_visit)
+            if self.check_at_goal(coordinate_to_visit): 
+                retval = True ##################################### Fill in return algorithm here
+            else: 
+                self.determine_next_neighbor(coordinate_to_visit)
+            self.move(coordinate_to_visit)
         return retval
 
 
     def calculate_search_algorithm(self):
         coord_to_visit = self.stack.pop()
         if self.visit(coord_to_visit):
-            self.stack = []
+            self.reset_trail()
+            
         
 
         
@@ -78,7 +88,7 @@ class Hero(Character):
             new_coordinatex = coordinate_visited[0] + direction[0]
             new_coordinatey = coordinate_visited[1] + direction[1]
             new_coordinate = (new_coordinatex, new_coordinatey)
-            if new_coordinate not in self.visited_squares and self.is_valid_square(new_coordinate) and new_coordinate not in self.stack:
+            if new_coordinate not in self.visited_squares and self.is_valid_square(new_coordinate):
                 self.stack.append(new_coordinate)
 
     def is_valid_square(self, coordinate):

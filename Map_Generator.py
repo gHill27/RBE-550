@@ -197,7 +197,8 @@ class Map:
         for coordinate in self.enemy_coordinate_list:
             if coordinate not in self.obstacle_coordinate_list:
                 self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
-        self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"orange")
+        if self.hero_coordinate != self.goal_pos:
+            self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"orange")
 
 
     def update_characters(self, enemy_coordinate_list:list, hero_postion):
