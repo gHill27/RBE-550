@@ -4,7 +4,7 @@ from Characters import Enemy
 from Characters import Hero
 
 #create map
-map1 = Map(30,30,0.2)
+map1 = Map(15,60,0.1)
 map1.Fill_map()
 
 #enemy generation function
@@ -25,12 +25,17 @@ map1.generate_goal()
 
 def main_loop():
     enemy_coord_list = []
-    for enemy in enemies:
-        enemy.move()
-        enemy_coord_list.append(enemy.coordinate)
-    hero.move((1,1))
+    # for enemy in enemies:
+    #     enemy.move()
+    #     enemy_coord_list.append(enemy.coordinate)
+    #hero.move((1,1))
+    
+    if(len(hero.stack) != 0):
+        hero.calculate_search_algorithm()
+
     map1.update_characters(enemy_coord_list,hero.coordinate)
-    map1.root.after(300,main_loop)
+    if map1.check_game_over(): map1.game_over_screen()
+    map1.root.after(30,main_loop)
 
 main_loop()
 map1.Open_map()

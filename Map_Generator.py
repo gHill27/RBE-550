@@ -197,7 +197,7 @@ class Map:
         for coordinate in self.enemy_coordinate_list:
             if coordinate not in self.obstacle_coordinate_list:
                 self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
-        self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"white")
+        self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"orange")
 
 
     def update_characters(self, enemy_coordinate_list:list, hero_postion):
@@ -214,7 +214,31 @@ class Map:
             self.color_cell(self.canvas, enemy_coordinate[1], enemy_coordinate[0], "red", "triangle")
         self.color_cell(self.canvas, hero_postion[1], hero_postion[0], "black", "circle")
         
+    def check_game_over(self):
+        return self.hero_coordinate in self.enemy_coordinate_list
+            
+    def game_over_screen(self):
+        """
+        Function created using ChatGPT prompt in response to creating "game over" display 
+        """
+        # Clear everything drawn on canvas
+        self.canvas.delete("all")
 
+        # Optional: disable further updates
+        self.canvas.unbind_all("<Key>")
+
+        # Center of the screen
+        center_x = (self.grid_num * self.cell_size) // 2
+        center_y = (self.grid_num * self.cell_size) // 2
+
+        self.canvas.create_text(
+            center_x,
+            center_y,
+            text="GAME OVER",
+            fill="red",
+            font=("Helvetica", 36, "bold")
+        )
+        
 
     def Fill_map(self):
         # Draw the 128x128 lines
