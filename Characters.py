@@ -24,7 +24,7 @@ class Enemy(Character):
     
     def move(self):
         if not self.crashed:
-            next_point = self.map.Move_enemy_cell(self.coordinate)
+            next_point = self.determine_movement()
             if self.check_collision():
                 self.become_obstacle()
             else:
@@ -33,6 +33,28 @@ class Enemy(Character):
     def become_obstacle(self):
         self.map.append_new_obstacle(self.coordinate)
         self.crashed = True
+
+    def determine_movement(self):
+        row, col = self.coordinate
+
+        possible_moves = [(-1, 0),(0, -1),(0, 1),(1,0)]
+
+        best = None
+        best_distance = 100000000.0
+
+        for x, y in possible_moves:
+            new_row = row + x
+            new_col = col + y
+
+            if 0 <= new_row < self.map.grid_num and 0 <= new_col < self.map.grid_num:
+                distance = abs(self.map.hero_coordinate[0] - new_row) + abs(self.map.hero_coordinate[1] - new_col)
+                if distance < best_distance:
+                    best_distance = distance
+                    best = (new_row,new_col)
+        if best:                    
+            return best
+        else:
+            return "error! no distance could be specified"
 
 
 class Hero(Character):
@@ -45,7 +67,7 @@ class Hero(Character):
         self.visited_squares = []
         self.stack = []
         self.directions = [(1,0), (0,1) ,(-1,0), (0,-1)]
-        self.enemy_radius = [(1,0), (0,1) ,(-1,0), (0,-1), (2,0), (0,2), (-2,0), (0,-2)]
+        self.enemy_radius = [(1,0), (1,1), (0,1), (1,-1) ,(-1,0), (-1,1), (0,-1), (-1,-1),(2,0), (0,2), (-2,0), (0,-2)]
         self.parent_dict = {self.planned_coordinate:None}
         self.path_to_victory = []
         self.visit(self.planned_coordinate)
@@ -56,7 +78,7 @@ class Hero(Character):
         Checks if the hero's current position matches the goal
         """
         if self.planned_coordinate == self.map.goal_pos:
-            print("reached goal")
+            #print("reached goal")
             return True
         else:
             return False
@@ -76,7 +98,7 @@ class Hero(Character):
     def reset(self):
         """ Clears the previous trail of pathfinding algorithm"""
         for square in self.visited_squares:
-            self.map.color_cell(self.map.canvas, square[1], square[0], "white")
+            #self.map.color_cell(self.map.canvas, square[1], square[0], "white")
             self.map.color_cell(self.map.canvas, self.map.goal_pos[1], self.map.goal_pos[0], "green")
         self.visited_squares = []
         self.stack = []
@@ -95,7 +117,7 @@ class Hero(Character):
 
     def calculate_search_algorithm(self):
         if len(self.stack) == 0:
-            print("teleporting due to bad spawn!")
+            print("No viable Solution!, Teleporting")
             self.teleport_hero() 
         coord_to_visit = self.stack[0]
         self.stack.remove(coord_to_visit)

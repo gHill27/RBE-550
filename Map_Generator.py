@@ -23,6 +23,7 @@ class Map:
         self.prev_hero_coordinate = (-1,-1)
         self.root = tk.Tk()
         self.root.title("The Hero's Jounery")
+        self.directions = [(1,0), (0,1) ,(-1,0), (0,-1)]
 
         # Create a canvas large enough for 128 cells
         self.canvas_dim = self.grid_num * self.cell_size
@@ -61,41 +62,29 @@ class Map:
     def find_open_square(self):
         """This function uses a random coordinate and shape to determine if they would fit into the obstacle board's boundaries"""
         new_coordinate = self.generate_random_coord()
-        if(new_coordinate in self.obstacle_coordinate_list or new_coordinate in self.enemy_coordinate_list or new_coordinate == self.hero_coordinate or new_coordinate == self.goal_pos):
+        if(self.check_cell_occupied(new_coordinate)):
             self.find_open_square()
         else:
             return new_coordinate[0]
 
+    def check_cell_occupied(self,new_coordinate):
+        return new_coordinate in self.obstacle_coordinate_list or new_coordinate in self.enemy_coordinate_list or new_coordinate == self.hero_coordinate or new_coordinate == self.goal_pos
+
     def generate_goal(self):
+        fail_counter = 0
         if self.goal_pos == (-1,-1):
             self.goal_pos = self.find_open_square()
-            self.color_cell(self.canvas, self.goal_pos[1], self.goal_pos[0], "green")
-    
-    def Move_enemy_cell(self,position):
-        row, col = position
-
-        possible_moves = [
-            (-1, -1), (-1, 0), (-1, 1),
-            ( 0, -1),          ( 0, 1),
-            ( 1, -1), ( 1, 0), ( 1, 1)
-        ]
-
-        best = None
-        best_distance = 100000000.0
-
-        for x, y in possible_moves:
-            new_row = row + x
-            new_col = col + y
-
-            if 0 <= new_row < self.grid_num and 0 <= new_col < self.grid_num:
-                distance = abs(self.hero_coordinate[0] - new_row) + abs(self.hero_coordinate[1] - new_col)
-                if distance < best_distance:
-                    best_distance = distance
-                    best = (new_row,new_col)
-        if best:                    
-            return best
-        else:
-            return "error! no distance could be specified"
+            for direction in self.directions:
+               goalx = self.goal_pos[0] + direction[0]
+               goaly = self.goal_pos[1] + direction[1]
+               trial_goal = (goalx,goaly)
+               if self.check_cell_occupied(trial_goal):
+                   fail_counter = fail_counter + 1
+            if fail_counter == 4:
+                print("not a valid goal")
+                self.generate_goal()
+            else:
+                self.color_cell(self.canvas, self.goal_pos[1], self.goal_pos[0], "green")
 
     def generate_field_obstacle(self, shape, attempts):
         THREE_TALL = 1
@@ -199,9 +188,9 @@ class Map:
         for coordinate in self.prev_enemy_coordinate_list:
             if coordinate not in self.obstacle_coordinate_list:
                 self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
-        if self.hero_coordinate != self.goal_pos:
-            self.color_cell(self.canvas, self.prev_hero_coordinate[1], self.prev_hero_coordinate[0],"orange")
-
+        if self.hero_coordinate != self.goal_pos or self.prev_hero_coordinate != self.goal_pos:
+            self.color_cell(self.canvas, self.prev_hero_coordinate[1], self.prev_hero_coordinate[0],"white")
+        
 
     def update_characters(self, enemy_coordinate_list:list, hero_postion):
         """
