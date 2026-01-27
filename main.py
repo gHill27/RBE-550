@@ -16,7 +16,7 @@ def generate_enemies(number_of_enemies):
         enemy_list.append(enemy)
     return enemy_list
 #real enemy generation
-enemies = generate_enemies(0)
+enemies = generate_enemies(4)
 
 #hero generation
 hero = Hero(map1,0)
@@ -29,13 +29,15 @@ def main_loop():
         enemy_coord_list.append(enemy.coordinate)
     
     
-    if(len(hero.stack) != 0):
+    while(not hero.is_route_planned):
         hero.calculate_search_algorithm()
 
-    map1.update_characters(enemy_coord_list,hero.coordinate)
+    if(len(hero.path_to_victory) > 0):
+        hero.move()
+    map1.update_characters(enemy_coord_list,hero.real_coordinate)
     if map1.check_game_over(): map1.game_over_screen()
     else:
-        map1.root.after(30,main_loop)
+        map1.root.after(300,main_loop)
 
 main_loop()
 map1.Open_map()
