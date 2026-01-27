@@ -19,17 +19,20 @@ class Enemy(Character):
     def __init__(self,map:Map, id:int):
         super().__init__(map,id)
         self.coordinate = self.map.find_open_square()
+        self.crashed = False
         self.map.enemy_coordinate_list.append(self.coordinate)
     
     def move(self):
-        next_point = self.map.Move_enemy_cell(self.coordinate)
-        if self.check_collision():
-            self.become_obstacle()
-        else:
-            self.coordinate = next_point
+        if not self.crashed:
+            next_point = self.map.Move_enemy_cell(self.coordinate)
+            if self.check_collision():
+                self.become_obstacle()
+            else:
+                self.coordinate = next_point
 
     def become_obstacle(self):
         self.map.append_new_obstacle(self.coordinate)
+        self.crashed = True
 
 
 class Hero(Character):
@@ -44,6 +47,9 @@ class Hero(Character):
         self.visit(self.coordinate)
         
     def check_at_goal(self,coordinate_to_visit):
+        """
+        Checks if the hero's current position matches the goal
+        """
         if coordinate_to_visit == self.map.goal_pos:
             print("reached goal")
             return True
@@ -51,12 +57,14 @@ class Hero(Character):
             return False
         
     def teleport_hero(self):
+        """ Teleports the hero to a random unoccupied cell, clearing his previous trail"""
         if self.teleport_counter < 5:
             self.coordinate = self.map.find_open_square()
             self.teleport_counter = self.teleport_counter + 1
             self.reset_trail()
     
     def reset_trail(self):
+        """ Clears the previous trail of pathfinding algorithm"""
         for square in self.visited_squares:
             self.map.color_cell(self.map.canvas, square[1], square[0], "white")
             self.map.color_cell(self.map.canvas, self.map.goal_pos[1], self.map.goal_pos[0], "green")
@@ -64,24 +72,20 @@ class Hero(Character):
         self.stack = []
 
     def visit(self,coordinate_to_visit):
-        retval = False
         if coordinate_to_visit not in self.visited_squares:    
             self.visited_squares.append(coordinate_to_visit)
-            if self.check_at_goal(coordinate_to_visit): 
-                retval = True ##################################### Fill in return algorithm here
-            else: 
-                self.determine_next_neighbor(coordinate_to_visit)
+            self.determine_next_neighbor(coordinate_to_visit)
             self.move(coordinate_to_visit)
-        return retval
+        
 
 
     def calculate_search_algorithm(self):
         coord_to_visit = self.stack.pop()
-        if self.visit(coord_to_visit):
+        self.visit(coord_to_visit)
+        if self.check_at_goal(coord_to_visit): 
+            ##################################### Fill in return algorithm here
             self.reset_trail()
             
-        
-
         
     def determine_next_neighbor(self,coordinate_visited):
         for direction in self.directions:

@@ -18,7 +18,9 @@ class Map:
         self.obstacle_coordinate_list = []
         self.goal_pos = (-1,-1) #to be updated 
         self.enemy_coordinate_list = []
+        self.prev_enemy_coordinate_list = []
         self.hero_coordinate = (-1,-1) #to be updated
+        self.prev_hero_coordinate = (-1,-1)
         self.root = tk.Tk()
         self.root.title("The Hero's Jounery")
 
@@ -194,11 +196,11 @@ class Map:
 
     def remove_previous_enities(self):
         #removes previous enemy positions
-        for coordinate in self.enemy_coordinate_list:
+        for coordinate in self.prev_enemy_coordinate_list:
             if coordinate not in self.obstacle_coordinate_list:
                 self.color_cell(self.canvas,coordinate[1],coordinate[0],"white")
         if self.hero_coordinate != self.goal_pos:
-            self.color_cell(self.canvas, self.hero_coordinate[1], self.hero_coordinate[0],"orange")
+            self.color_cell(self.canvas, self.prev_hero_coordinate[1], self.prev_hero_coordinate[0],"orange")
 
 
     def update_characters(self, enemy_coordinate_list:list, hero_postion):
@@ -208,12 +210,15 @@ class Map:
         Should run every loop call to ensure proper display
         
         """
-        self.remove_previous_enities()
-        self.enemy_coordinate_list = enemy_coordinate_list
+        
         self.hero_coordinate = hero_postion
+        self.enemy_coordinate_list = enemy_coordinate_list
+        self.remove_previous_enities()
         for enemy_coordinate in enemy_coordinate_list:
             self.color_cell(self.canvas, enemy_coordinate[1], enemy_coordinate[0], "red", "triangle")
         self.color_cell(self.canvas, hero_postion[1], hero_postion[0], "black", "circle")
+        self.prev_hero_coordinate = hero_postion
+        self.prev_enemy_coordinate_list = enemy_coordinate_list
         
     def check_game_over(self):
         return self.hero_coordinate in self.enemy_coordinate_list
