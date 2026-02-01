@@ -2,49 +2,167 @@
 # on January 17, 2026, in response to a request for a 128x128 Tkinter grid.
 # URL: https://gemini.google.com/
 
-import tkinter as tk
-
 import random
 
 from enum import Enum
 
+from render import Renderer
+from Characters import Hero, Enemy
+from collections import deque
 
 class Map:
 
-    def __init__(self, Grid_num, cell_size, fill_percent):
+    def __init__(self, Grid_num, cell_size, fill_percent:float):
         self.grid_num = Grid_num
-        self.cell_size = cell_size
         self.fill_percent = fill_percent
+        self.hero = None  # to be updated 
+        self.renderer = Renderer(Grid_num,cell_size,fill_percent)
         self.obstacle_coordinate_list = []
-        self.goal_pos = (-1, -1)  # to be updated
-        self.enemy_coordinate_list = []
-        self.prev_enemy_coordinate_list = []
-        self.hero_coordinate = (-1, -1)  # to be updated
-        self.prev_hero_coordinate = (-1, -1)
-        self.root = tk.Tk()
-        self.root.title("The Hero's Jounery")
-        self.directions = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+        self.is_map_full = False
+        self.enemy_list = [] # to be updated
+        self.goal_pos = None  # to be updated
+        self.is_hero_at_goal = False
+        self.directions = [(1, 0), (0, 1), (-1, 0), (0, -1)] 
+        self._generate_goal()
+        self._fill_map()       
 
-        # Create a canvas large enough for 128 cells
-        self.canvas_dim = self.grid_num * self.cell_size
-        self.canvas = tk.Canvas(
-            self.root, width=self.canvas_dim, height=self.canvas_dim, bg="white"
-        )
-        self.canvas.pack(padx=10, pady=10)
+    def generate_enemies(self,number_of_enemies):
+
+        for i in range(number_of_enemies): 
+            new_enemy = (Enemy(self.find_open_square()))
+            self.renderer.color_cell(new_enemy.getCoordinate(),"red","triangle")
+            self.enemy_list.append(new_enemy)
+
+    def step_enemies(self):
+        for enemy in self.enemy_list:
+            if enemy.crashed == True:
+                self.enemy_list.remove(enemy)
+                continue
+            elif self.hero:
+                self.determine_enemy_movement(enemy)
+                if enemy.getCoordinate() in self.obstacle_coordinate_list:
+                    enemy.become_obstacle()
+                    self.append_new_obstacle(enemy.getCoordinate())
+
+    def determine_enemy_movement(self,enemy:Enemy):
+        """Finds the direction to move closest to the robot"""
+        row, col = enemy.getCoordinate()
+        best = None
+        best_distance = 100000000.0
+
+        for x, y in self.directions:
+            new_row = row + x
+            new_col = col + y
+
+            if 0 <= new_row < self.grid_num and 0 <= new_col < self.grid_num:
+                distance = abs(self.hero.getCoordinate()[0] - new_row) + abs(
+                    self.hero.getCoordinate()[1] - new_col
+                )
+                if distance < best_distance:
+                    best_distance = distance
+                    best = (new_row, new_col)
+        if best:
+            enemy.move(best)
+        else:
+            return "error! no distance could be specified"
+        
+    def generate_hero(self):
+        self.hero = Hero(self.find_open_square())
+
+    def BFS(self):
+        """ Preforms the BFS on the grid and plans a route"""
+        self.hero.parent_dict[self.hero.getCoordinate()] = None
+        while self.hero.queue:
+            next_square = self.hero.queue.popleft()
+            if next_square in self.hero.visited:
+                raise Exception("seen this square, redunant checking")
+            self.hero.visited.append(next_square)
+            if next_square != self.goal_pos:
+                for neighbor in self.determine_neighbors(next_square):
+                    if neighbor not in self.hero.visited and neighbor not in self.hero.queue:
+                        self.hero.queue.append(neighbor)
+                        self.hero.parent_dict[neighbor] = next_square
+            else:
+                self.hero.queue = deque()
+                self.hero.path_to_victory = self.reconstruct_path()
+                self.hero.is_route_planned = True
+            
+    def determine_neighbors(self,coordinate):
+        """ This finds and adds neighbor nodes into the queue"""
+        neighbors = []
+        for direction in self.directions:
+            new_coordinatex = coordinate[0] + direction[0]
+            new_coordinatey = coordinate[1] + direction[1]
+            new_coordinate = (new_coordinatex, new_coordinatey)
+            if new_coordinate not in self.hero.visited and self.check_valid_cell(new_coordinate):
+                neighbors.append(new_coordinate)
+                
+        return neighbors
+
+    def check_valid_cell(self,coordinate):
+        """
+        This will be used to check if the hero has access to the square
+
+        This is intended be a safety check to ensure smooth motion
+        """
+        row, col = coordinate
+        retval = True
+
+        # inside grid
+        if row < 0 or row >= self.grid_num:
+            retval = False
+        if col < 0 or col >= self.grid_num:
+            retval = False
+
+        # not an obstacle
+        if coordinate in self.obstacle_coordinate_list:
+            retval = False
+
+        return retval
+    
+    def reconstruct_path(self):
+        """Determines the optimal path from the BFS algorithm"""
+        reversed_path = []
+        current_coordinate = self.goal_pos
+        while current_coordinate is not None:
+            reversed_path.append(current_coordinate)
+            current_coordinate = self.hero.parent_dict[current_coordinate]
+        return reversed_path
+
+
+    def detect_enemy_nearby(self,coordinate):
+        """returns if there are upcoming dangerous robots nearby"""
+        retval = False
+        for direction in self.hero.enemy_radius:
+            new_coordinatex = coordinate[0] + direction[0]
+            new_coordinatey = coordinate[1] + direction[1]
+            new_coordinate = (new_coordinatex, new_coordinatey)
+            for enemy in self.enemy_list:
+                if new_coordinate in enemy.getCoordinate():
+                    retval = True
+            # check for collisions:
+        return retval
+    
+    def step_hero(self):
+        if self.hero:
+            if self.check_at_goal():
+                self.is_hero_at_goal = True
+            else:
+                if self.hero.is_route_planned == False:
+                    print("searching")
+                    self.BFS()
+                    print("completed search")
+                coord_to_move = self.hero.path_to_victory.pop()
+                if self.detect_enemy_nearby(coord_to_move):
+                    self.hero.teleport_hero(self.find_open_square())
+                else:
+                    self.hero.move(coord_to_move)
+                    #print("moving")
+            
 
     def append_new_obstacle(self, coordinate):
         self.obstacle_coordinate_list.append(coordinate)
-        self.color_cell(self.canvas, coordinate[1], coordinate[0],"black")
-
-    def draw_128_grid(self, canvas):
-        """This function creates a canvas of size 128 x 128"""
-        max_dim = self.grid_num * self.cell_size
-        # Draw Vertical Lines
-        for x in range(0, max_dim + self.cell_size, self.cell_size):
-            canvas.create_line(x, 0, x, max_dim, fill="lightgray")
-        # Draw Horizontal Lines
-        for y in range(0, max_dim + self.cell_size, self.cell_size):
-            canvas.create_line(0, y, max_dim, y, fill="lightgray")
+        self.renderer.color_cell(coordinate)
 
     # this function generates a random number associated with the shapes above
     def generate_random_tetromino(self):
@@ -62,60 +180,73 @@ class Map:
         ]
 
         # 2. Pick unique pairs automatically
-        return random.sample(all_coords, 1)
+        sample = random.sample(all_coords, 1)
+        return sample[0]
 
     def find_open_square(self):
         """This function uses a random coordinate and shape to determine if they would fit into the obstacle board's boundaries"""
         new_coordinate = self.generate_random_coord()
         if self.check_cell_occupied(new_coordinate):
-            self.find_open_square()
+            return self.find_open_square()
         else:
-            return new_coordinate[0]
+            return new_coordinate
 
     def check_cell_occupied(self, new_coordinate):
-        return (
-            new_coordinate in self.obstacle_coordinate_list
-            or new_coordinate in self.enemy_coordinate_list
-            or new_coordinate == self.hero_coordinate
-            or new_coordinate == self.goal_pos
-        )
+        retval = False
+        for enemy in self.enemy_list:
+            if enemy.getCoordinate() == new_coordinate:
+                retval = True
+        if (new_coordinate in self.obstacle_coordinate_list):
+            retval = True
+        elif (new_coordinate == self.goal_pos):
+            retval = True
+        elif (self.hero):
+            if new_coordinate == self.hero.getCoordinate():
+                retval = True
+        return retval
 
-    def generate_goal(self):
+    def _generate_goal(self):
         fail_counter = 0
-        if self.goal_pos == (-1, -1):
-            self.goal_pos = self.find_open_square()
-            for direction in self.directions:
-                goalx = self.goal_pos[0] + direction[0]
-                goaly = self.goal_pos[1] + direction[1]
-                trial_goal = (goalx, goaly)
-                if self.check_cell_occupied(trial_goal):
-                    fail_counter = fail_counter + 1
-            if fail_counter == 4:
-                print("not a valid goal")
-                self.generate_goal()
-            else:
-                self.color_cell(
-                    self.canvas, self.goal_pos[1], self.goal_pos[0], "green"
+        if isinstance(self.goal_pos, tuple):
+            raise Exception("the goal has been defined before!")
+        test_goal_pos = self.find_open_square()
+        for direction in self.directions:
+            goalx = test_goal_pos[0] + direction[0]
+            goaly = test_goal_pos[1] + direction[1]
+            trial_goal = (goalx, goaly)
+            if self.check_cell_occupied(trial_goal):
+                fail_counter = fail_counter + 1
+                if fail_counter > 25:
+                    raise Exception("Goal Could not be placed in valid location")
+                self._generate_goal()
+                break    
+        self.goal_pos = test_goal_pos
+        self.renderer.color_cell(
+        self.goal_pos, "green"
                 )
-
-    def generate_field_obstacle(self, shape, attempts):
+                
+    def check_on_grid(self,coord):
+        return (0 < coord[0] < self.grid_num and 0 < coord[1] < self.grid_num) 
+     
+    def generate_field_obstacle(self, shape, attempts=0):
         THREE_TALL = 1
         UPSIDEDOWN_L = 2
         TETRIS = 3
         HALF_PLUS = 4
         if attempts > 1000:
-            return True
+            print("over 1000 attempts trailed no place found")
+            self.is_map_full = True
+            return
         coordinate = self.find_open_square()
+        #print(coordinate)
         x_cord = coordinate[0]
         y_cord = coordinate[1]
         coord_list = []
         if shape == THREE_TALL:  # boundary check for each shape
-            if y_cord + 1 <= 128 and y_cord - 1 >= 0:
+            if 0 < y_cord +1 < self.grid_num and 0 < y_cord - 1 < self.grid_num:
                 above_cord = (x_cord, y_cord - 1)
                 below_cord = (x_cord, y_cord + 1)
-                if (
-                    above_cord in self.obstacle_coordinate_list
-                    or below_cord in self.obstacle_coordinate_list
+                if (self.check_cell_occupied(above_cord) or self.check_cell_occupied(below_cord)
                 ):
                     self.generate_field_obstacle(shape, attempts + 1)
                 else:
@@ -127,10 +258,7 @@ class Map:
                 left_cord = (x_cord - 1, y_cord - 1)
                 above_cord = (x_cord, y_cord - 1)
                 below_cord = (x_cord, y_cord + 1)
-                if (
-                    left_cord in self.obstacle_coordinate_list
-                    or above_cord in self.obstacle_coordinate_list
-                    or below_cord in self.obstacle_coordinate_list
+                if (self.check_cell_occupied(left_cord) or self.check_cell_occupied(above_cord) or self.check_cell_occupied(below_cord)
                 ):
                     self.generate_field_obstacle(shape, attempts + 1)
                 else:
@@ -169,120 +297,70 @@ class Map:
 
         for coordinate in coord_list:
             self.obstacle_coordinate_list.append(coordinate)
-            self.color_cell(self.canvas, coordinate[1], coordinate[0])
-        return False
+            self.renderer.color_cell(coordinate)
+        
+    def _fill_map(self):
+        while(not self.is_map_full and len(self.obstacle_coordinate_list) < self.grid_num*self.grid_num*self.fill_percent):
+            self.generate_field_obstacle(self.generate_random_tetromino())
+        #debug test 
+        #print(f" length of obstacle list {len(self.obstacle_coordinate_list)}. the number of cells: {self.grid_num*self.grid_num}.")
+        
+    
 
-    def color_cell(self, canvas, row, col, color="black", shape="square"):
-        """Color a cell with a specific shape"""
+    def _remove_enities(self):
+        # removes all entities
+            for enemy in self.enemy_list:
+                self.renderer.color_cell(enemy.getCoordinate(),"white")
+            if self.hero:
+                self.renderer.color_cell(self.hero.getCoordinate(),"white")
 
-        if 0 <= row < self.grid_num and 0 <= col < self.grid_num:
-            x1 = col * self.cell_size
-            y1 = row * self.cell_size
-            x2 = x1 + self.cell_size
-            y2 = y1 + self.cell_size
-
-            if shape == "square":
-                canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="lightgray")
-
-            elif shape == "triangle":
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                size = self.cell_size * 0.4  # controls how big the triangle is
-
-                canvas.create_polygon(
-                    cx,
-                    cy - size,  # top
-                    cx - size,
-                    cy + size,  # bottom-left
-                    cx + size,
-                    cy + size,  # bottom-right
-                    fill=color,
-                    outline="lightgray",
-                )
-
-            elif shape == "circle":
-                padding = self.cell_size * 0.1
-                canvas.create_oval(
-                    x1 + padding,
-                    y1 + padding,
-                    x2 - padding,
-                    y2 - padding,
-                    fill=color,
-                    outline="lightgray",
-                )
-
-    def remove_previous_enities(self):
-        # removes previous enemy positions
-        for coordinate in self.prev_enemy_coordinate_list:
-            if coordinate not in self.obstacle_coordinate_list:
-                self.color_cell(self.canvas, coordinate[1], coordinate[0], "white")
-        if (
-            self.hero_coordinate != self.goal_pos
-            or self.prev_hero_coordinate != self.goal_pos
-        ):
-            self.color_cell(
-                self.canvas,
-                self.prev_hero_coordinate[1],
-                self.prev_hero_coordinate[0],
-                "white",
-            )
-
-    def update_characters(self, enemy_coordinate_list: list, hero_postion):
+    def update_characters(self):
         """
         Updates enemy and hero position and updates the current list
 
         Should run every loop call to ensure proper display
 
         """
-
-        self.hero_coordinate = hero_postion
-        self.enemy_coordinate_list = enemy_coordinate_list
-        self.remove_previous_enities()
-        for enemy_coordinate in enemy_coordinate_list:
-            self.color_cell(
-                self.canvas, enemy_coordinate[1], enemy_coordinate[0], "red", "triangle"
-            )
-        self.color_cell(
-            self.canvas, hero_postion[1], hero_postion[0], "black", "circle"
-        )
-        self.prev_hero_coordinate = hero_postion
-        self.prev_enemy_coordinate_list = enemy_coordinate_list
+        self._remove_enities()
+        self.step_hero()
+        if self.is_hero_at_goal == False:
+            self.step_enemies()
+        self.renderer.color_cell(self.goal_pos,"green")
+        for enemy in self.enemy_list:
+            self.renderer.color_cell(enemy.getCoordinate(), "red", "triangle")
+        if self.hero:
+            self.renderer.color_cell(self.hero.getCoordinate(), "black", "circle")
+        
 
     def check_game_over(self):
-        return self.hero_coordinate in self.enemy_coordinate_list
-
-    def game_over_screen(self):
+        retval = False
+        for enemy in self.enemy_list:
+            if self.hero.getCoordinate() == enemy.getCoordinate():
+                retval = True
+        return retval
+    
+    def check_at_goal(self):
         """
-        Function created using ChatGPT prompt in response to creating "game over" display
+        Checks if the hero's current position matches the goal
         """
-        # Clear everything drawn on canvas
-        self.canvas.delete("all")
+        if self.hero.getCoordinate() == self.goal_pos:
+            #print("reached goal")
+            return True
+        else:
+            return False
 
-        # Optional: disable further updates
-        self.canvas.unbind_all("<Key>")
-
-        # Center of the screen
-        center_x = (self.grid_num * self.cell_size) // 2
-        center_y = (self.grid_num * self.cell_size) // 2
-
-        self.canvas.create_text(
-            center_x,
-            center_y,
-            text="GAME OVER",
-            fill="red",
-            font=("Helvetica", 36, "bold"),
-        )
-
-    def Fill_map(self):
-        # Draw the 128x128 lines
-        self.draw_128_grid(self.canvas)
-        while (
-            len(self.obstacle_coordinate_list)
-            < self.grid_num * self.grid_num * self.fill_percent
-        ):
-            if self.generate_field_obstacle(self.generate_random_tetromino(), 0):
-                print("too many attempts")
-                break
-
-    def Open_map(self):
-        self.root.mainloop()
+   
+if __name__ == "__main__":
+    pass
+    test = Map(30,40,0)
+    test.hero = Hero((1,1))
+    test.goal_pos = (1,15)
+    for i in range(50):
+        test.update_characters()
+    test.renderer.Open_map()
+    # test.generate_hero()
+    # test.step_hero()
+    # flag = True
+    # test.step_enemies()
+    # test.renderer.root.after(300, main)
+    # test.renderer.Open_map()
