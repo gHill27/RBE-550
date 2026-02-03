@@ -6,7 +6,7 @@ from Characters import Hero
 # create map
 map1 = Map(25, 60, 0.2)
 map1.generate_hero()
-map1.generate_enemies
+map1.generate_enemies(10)
 
 def main_loop():
     map1.update_characters()
