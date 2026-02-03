@@ -4,7 +4,7 @@ from Characters import Enemy
 from Characters import Hero
 
 # create map
-map1 = Map(25, 60, 0.2)
+map1 = Map(30, 40, 0.1)
 map1.generate_hero()
 map1.generate_enemies(10)
 

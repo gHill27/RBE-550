@@ -23,7 +23,7 @@ class Map:
         self.goal_pos = None  # to be updated
         self.is_hero_at_goal = False
         self.is_game_over = False
-        self.directions = [(1, 0), (0, 1), (-1, 0), (0, -1)] 
+        self.directions = [(-1,-1),(-1,1), (1,1),(1,-1),(0, 1),(-1, 0),(0, -1),(1, 0)]
         self._generate_goal()
         self._fill_map()       
 
@@ -55,7 +55,7 @@ class Map:
         best = None
         best_distance = 100000000.0
 
-        for x, y in self.directions:
+        for x, y in enemy.directions:
             new_row = row + x
             new_col = col + y
 
@@ -87,6 +87,8 @@ class Map:
                     if neighbor not in self.hero.visited and neighbor not in self.hero.queue:
                         self.hero.queue.append(neighbor)
                         self.hero.parent_dict[neighbor] = next_square
+                if len(self.hero.queue) == 0:
+                    raise Exception("Hero unable to move from position")
             else:
                 self.hero.queue = deque()
                 self.hero.path_to_victory = self.reconstruct_path()
@@ -95,7 +97,7 @@ class Map:
     def determine_neighbors(self,coordinate):
         """ This finds and adds neighbor nodes into the queue"""
         neighbors = []
-        for direction in self.directions:
+        for direction in self.hero.directions:
             new_coordinatex = coordinate[0] + direction[0]
             new_coordinatey = coordinate[1] + direction[1]
             new_coordinate = (new_coordinatex, new_coordinatey)
@@ -132,6 +134,8 @@ class Map:
         while current_coordinate is not None:
             reversed_path.append(current_coordinate)
             current_coordinate = self.hero.parent_dict[current_coordinate]
+        if len(reversed_path) == 0:
+            raise Exception("No path found in BFS")
         return reversed_path
 
 
@@ -143,7 +147,7 @@ class Map:
             new_coordinatey = coordinate[1] + direction[1]
             new_coordinate = (new_coordinatex, new_coordinatey)
             for enemy in self.enemy_list:
-                if new_coordinate in enemy.getCoordinate():
+                if new_coordinate == enemy.getCoordinate():
                     retval = True
             # check for collisions:
         return retval
