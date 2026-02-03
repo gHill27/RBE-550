@@ -22,6 +22,7 @@ class Map:
         self.enemy_list = [] # to be updated
         self.goal_pos = None  # to be updated
         self.is_hero_at_goal = False
+        self.is_game_over = False
         self.directions = [(1, 0), (0, 1), (-1, 0), (0, -1)] 
         self._generate_goal()
         self._fill_map()       
@@ -39,6 +40,10 @@ class Map:
                 self.enemy_list.remove(enemy)
                 continue
             elif self.hero:
+                if self.hero.getCoordinate() == enemy.getCoordinate():
+                    self.renderer.game_over_screen()
+                    self.is_game_over = True
+                    break
                 self.determine_enemy_movement(enemy)
                 if enemy.getCoordinate() in self.obstacle_coordinate_list:
                     enemy.become_obstacle()
@@ -310,7 +315,8 @@ class Map:
     def _remove_enities(self):
         # removes all entities
             for enemy in self.enemy_list:
-                self.renderer.color_cell(enemy.getCoordinate(),"white")
+                if not enemy.crashed:
+                    self.renderer.color_cell(enemy.getCoordinate(),"white")
             if self.hero:
                 self.renderer.color_cell(self.hero.getCoordinate(),"white")
 
@@ -321,15 +327,16 @@ class Map:
         Should run every loop call to ensure proper display
 
         """
-        self._remove_enities()
-        self.step_hero()
-        if self.is_hero_at_goal == False:
-            self.step_enemies()
-        self.renderer.color_cell(self.goal_pos,"green")
-        for enemy in self.enemy_list:
-            self.renderer.color_cell(enemy.getCoordinate(), "red", "triangle")
-        if self.hero:
-            self.renderer.color_cell(self.hero.getCoordinate(), "black", "circle")
+        if not self.is_game_over:
+            self._remove_enities()
+            self.step_hero()
+            if self.is_hero_at_goal == False:
+                self.step_enemies()
+            self.renderer.color_cell(self.goal_pos,"green")
+            for enemy in self.enemy_list:
+                    self.renderer.color_cell(enemy.getCoordinate(), "red", "triangle")
+            if self.hero:
+                self.renderer.color_cell(self.hero.getCoordinate(), "black", "circle")
         
 
     def check_game_over(self):
