@@ -63,7 +63,6 @@ class Hero(Character):
     def teleport_hero(self,coordinate:tuple[int,int]):
         """Teleports the hero to a random unoccupied cell, clearing his previous trail"""
         if self.teleport_counter < 5:
-            print("teleporting!")
             self.reset(coordinate)
             self.teleport_counter = self.teleport_counter + 1
 

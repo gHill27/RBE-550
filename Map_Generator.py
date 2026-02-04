@@ -158,9 +158,9 @@ class Map:
                 self.is_hero_at_goal = True
             else:
                 if self.hero.is_route_planned == False:
-                    print("searching")
+                    #print("searching")
                     self.BFS()
-                    print("completed search")
+                    #print("completed search")
                 coord_to_move = self.hero.path_to_victory.pop()
                 if self.detect_enemy_nearby(coord_to_move):
                     self.hero.teleport_hero(self.find_open_square())
@@ -363,15 +363,4 @@ class Map:
    
 if __name__ == "__main__":
     pass
-    test = Map(30,40,0)
-    test.hero = Hero((1,1))
-    test.goal_pos = (1,15)
-    for i in range(50):
-        test.update_characters()
-    test.renderer.Open_map()
-    # test.generate_hero()
-    # test.step_hero()
-    # flag = True
-    # test.step_enemies()
-    # test.renderer.root.after(300, main)
-    # test.renderer.Open_map()
+    
