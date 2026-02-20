@@ -12,6 +12,7 @@ from collections import deque
 class Map:
 
     def __init__(self, Grid_num, cell_size, fill_percent:float):
+        #each cell is 3 meters by 3 meters in real distance
         self.grid_num = Grid_num
         self.fill_percent = fill_percent
         self.hero = None  # to be updated 

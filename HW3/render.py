@@ -92,10 +92,11 @@ class Renderer:
 
              
     def Open_map(self):
-        self.root.mainloop()
+        pass
+        #self.root.mainloop()
 
 if __name__ == "__main__":
-    new = Renderer(32,30,0.1)
+    new = Renderer(12,100,0.1)
     new.Open_map()
 
     
