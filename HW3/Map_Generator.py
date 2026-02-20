@@ -17,7 +17,7 @@ class Map:
         # each cell is 3 meters by 3 meters in real distance
         self.grid_num = Grid_num
         self.fill_percent = fill_percent
-        #self.renderer = Renderer(Grid_num, cell_size, fill_percent)
+        # self.renderer = Renderer(Grid_num, cell_size, fill_percent)
         self.obstacle_coordinate_list = []
         self.is_map_full = False
         self.enemy_list = []  # to be updated
