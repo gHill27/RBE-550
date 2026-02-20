@@ -8,27 +8,24 @@ from enum import Enum
 
 from render import Renderer
 from collections import deque
+from typing import Optional
+
 
 class Map:
 
-    def __init__(self, Grid_num, cell_size, fill_percent:float):
-        #each cell is 3 meters by 3 meters in real distance
+    def __init__(self, Grid_num, cell_size, fill_percent: float):
+        # each cell is 3 meters by 3 meters in real distance
         self.grid_num = Grid_num
         self.fill_percent = fill_percent
-        self.hero = None  # to be updated 
-        self.renderer = Renderer(Grid_num,cell_size,fill_percent)
+        #self.renderer = Renderer(Grid_num, cell_size, fill_percent)
         self.obstacle_coordinate_list = []
         self.is_map_full = False
-        self.enemy_list = [] # to be updated
-        self.goal_pos = None  # to be updated
-        self.is_hero_at_goal = False
-        self.is_game_over = False
-        self.directions = [(-1,-1),(-1,1), (1,1),(1,-1),(0, 1),(-1, 0),(0, -1),(1, 0)]
+        self.enemy_list = []  # to be updated
+        self.goal_pos: Optional[tuple[float, float]] = None  # to be updated
         self._generate_goal()
-        self._fill_map()       
+        self._fill_map()
 
-    
-    def check_valid_cell(self,coordinate):
+    def check_valid_cell(self, coordinate):
         """
         This will be used to check if the hero has access to the square
 
@@ -38,32 +35,20 @@ class Map:
         retval = True
 
         # inside grid
-        if row < 0 or row >= self.grid_num:
+        if row <= 0 or row >= self.grid_num:
             retval = False
-        if col < 0 or col >= self.grid_num:
+        if col <= 0 or col >= self.grid_num:
             retval = False
 
         # not an obstacle
-        if coordinate in self.obstacle_coordinate_list:
+        if (row, col) in self.obstacle_coordinate_list:
             retval = False
 
         return retval
-    
-    def reconstruct_path(self):
-        """Determines the optimal path from the BFS algorithm"""
-        reversed_path = []
-        current_coordinate = self.goal_pos
-        while current_coordinate is not None:
-            reversed_path.append(current_coordinate)
-            current_coordinate = self.hero.parent_dict[current_coordinate]
-        if len(reversed_path) == 0:
-            raise Exception("No path found in BFS")
-        return reversed_path
-            
 
     def append_new_obstacle(self, coordinate):
         self.obstacle_coordinate_list.append(coordinate)
-        self.renderer.color_cell(coordinate)
+        # self.renderer.color_cell(coordinate)
 
     # this function generates a random number associated with the shapes above
     def generate_random_tetromino(self):
@@ -94,35 +79,28 @@ class Map:
 
     def check_cell_occupied(self, new_coordinate):
         retval = False
-        if (new_coordinate in self.obstacle_coordinate_list):
+        if new_coordinate in self.obstacle_coordinate_list or new_coordinate == (0, 0):
             retval = True
-        elif (new_coordinate == self.goal_pos):
+        elif new_coordinate == self.goal_pos:
             retval = True
-
 
     def _generate_goal(self):
-        fail_counter = 0
-        if isinstance(self.goal_pos, tuple):
-            raise Exception("the goal has been defined before!")
-        test_goal_pos = self.find_open_square()
-        for direction in self.directions:
-            goalx = test_goal_pos[0] + direction[0]
-            goaly = test_goal_pos[1] + direction[1]
-            trial_goal = (goalx, goaly)
-            if self.check_cell_occupied(trial_goal):
-                fail_counter = fail_counter + 1
-                if fail_counter > 25:
-                    raise Exception("Goal Could not be placed in valid location")
-                self._generate_goal()
-                break    
-        self.goal_pos = test_goal_pos
-        self.renderer.color_cell(
-        self.goal_pos, "green"
-                )
-                
-    def check_on_grid(self,coord):
-        return (0 < coord[0] < self.grid_num and 0 < coord[1] < self.grid_num) 
-     
+        # TODO: fix implementation, goal can be inside an obstacle.
+        test_goal_coordinate = self.find_open_square()
+        if self.check_cell_occupied(test_goal_coordinate):
+            self._generate_goal()
+        else:
+            self.goal_pos = (
+                test_goal_coordinate[0] + 0.5,
+                test_goal_coordinate[1] + 0.5,
+            )
+            # self.renderer.color_cell(
+            # self.goal_pos, "green"
+            #     )
+
+    def check_on_grid(self, coord):
+        return 0 < coord[0] < self.grid_num and 0 < coord[1] < self.grid_num
+
     def generate_field_obstacle(self, shape, attempts=0):
         THREE_TALL = 1
         UPSIDEDOWN_L = 2
@@ -133,15 +111,16 @@ class Map:
             self.is_map_full = True
             return
         coordinate = self.find_open_square()
-        #print(coordinate)
+        # print(coordinate)
         x_cord = coordinate[0]
         y_cord = coordinate[1]
         coord_list = []
         if shape == THREE_TALL:  # boundary check for each shape
-            if 0 < y_cord +1 < self.grid_num and 0 < y_cord - 1 < self.grid_num:
+            if 0 < y_cord + 1 < self.grid_num and 0 < y_cord - 1 < self.grid_num:
                 above_cord = (x_cord, y_cord - 1)
                 below_cord = (x_cord, y_cord + 1)
-                if (self.check_cell_occupied(above_cord) or self.check_cell_occupied(below_cord)
+                if self.check_cell_occupied(above_cord) or self.check_cell_occupied(
+                    below_cord
                 ):
                     self.generate_field_obstacle(shape, attempts + 1)
                 else:
@@ -153,7 +132,10 @@ class Map:
                 left_cord = (x_cord - 1, y_cord - 1)
                 above_cord = (x_cord, y_cord - 1)
                 below_cord = (x_cord, y_cord + 1)
-                if (self.check_cell_occupied(left_cord) or self.check_cell_occupied(above_cord) or self.check_cell_occupied(below_cord)
+                if (
+                    self.check_cell_occupied(left_cord)
+                    or self.check_cell_occupied(above_cord)
+                    or self.check_cell_occupied(below_cord)
                 ):
                     self.generate_field_obstacle(shape, attempts + 1)
                 else:
@@ -192,19 +174,21 @@ class Map:
 
         for coordinate in coord_list:
             self.obstacle_coordinate_list.append(coordinate)
-            self.renderer.color_cell(coordinate)
-        
+            # self.renderer.color_cell(coordinate)
+
     def _fill_map(self):
-        while(not self.is_map_full and len(self.obstacle_coordinate_list) < self.grid_num*self.grid_num*self.fill_percent):
+        while (
+            not self.is_map_full
+            and len(self.obstacle_coordinate_list)
+            < self.grid_num * self.grid_num * self.fill_percent
+        ):
             self.generate_field_obstacle(self.generate_random_tetromino())
-        #debug test 
-        #print(f" length of obstacle list {len(self.obstacle_coordinate_list)}. the number of cells: {self.grid_num*self.grid_num}.")
-        
-    
+        # debug test
+        # print(f" length of obstacle list {len(self.obstacle_coordinate_list)}. the number of cells: {self.grid_num*self.grid_num}.")
 
     def _remove_enities(self):
         # removes all entities
-        pass 
+        pass
 
     def update_characters(self):
         """
@@ -214,9 +198,7 @@ class Map:
 
         """
         pass
-        
 
-   
+
 if __name__ == "__main__":
     pass
-    

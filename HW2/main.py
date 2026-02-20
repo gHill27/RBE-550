@@ -1,12 +1,11 @@
 from Map_Generator import Map
 
 
-
-
 # create map
 map1 = Map(64, 20, 0.1)
 map1.generate_hero()
 map1.generate_enemies(100)
+
 
 def main_loop():
     map1.update_characters()

@@ -1,8 +1,8 @@
-
 import tkinter as tk
 
+
 class Renderer:
-    #init function
+    # init function
     def __init__(self, grid_num, cell_size, fill_percent):
         self.grid_num = grid_num
         self.cell_size = cell_size
@@ -11,13 +11,12 @@ class Renderer:
         self.root.title("The Hero's Jounery")
         canvas_dim = self.grid_num * self.cell_size
         self.canvas = tk.Canvas(
-            self.root, width = canvas_dim, height = canvas_dim, bg="white"
+            self.root, width=canvas_dim, height=canvas_dim, bg="white"
         )
         self.canvas.pack(padx=10, pady=10)
         self._draw_grid()
         self.shaded_dict = {}
-        
-              
+
     def _draw_grid(self):
         """This function creates a canvas of size 128 x 128"""
         max_dim = self.grid_num * self.cell_size
@@ -28,18 +27,20 @@ class Renderer:
         for y in range(0, max_dim + self.cell_size, self.cell_size):
             self.canvas.create_line(0, y, max_dim, y, fill="lightgray")
 
-    def color_cell(self,coordinate, color="black", shape="square"):
+    def color_cell(self, coordinate, color="black", shape="square"):
         """Color a cell with a specific shape"""
-        row , col = coordinate
+        row, col = coordinate
         if 0 <= row < self.grid_num and 0 <= col < self.grid_num:
-            self.shaded_dict[color] = (coordinate)
+            self.shaded_dict[color] = coordinate
             x1 = row * self.cell_size
             y1 = col * self.cell_size
             x2 = x1 + self.cell_size
             y2 = y1 + self.cell_size
 
             if shape == "square":
-                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="lightgray")
+                self.canvas.create_rectangle(
+                    x1, y1, x2, y2, fill=color, outline="lightgray"
+                )
 
             elif shape == "triangle":
                 cx = (x1 + x2) / 2
@@ -90,12 +91,10 @@ class Renderer:
             font=("Helvetica", 36, "bold"),
         )
 
-             
     def Open_map(self):
         self.root.mainloop()
 
-if __name__ == "__main__":
-    new = Renderer(32,30,0.1)
-    new.Open_map()
 
-    
+if __name__ == "__main__":
+    new = Renderer(32, 30, 0.1)
+    new.Open_map()
