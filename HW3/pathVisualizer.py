@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from shapely.geometry import box
 from shapely.affinity import rotate, translate
+import math
 
 
 class PlannerVisualizer:
@@ -28,6 +29,25 @@ class PlannerVisualizer:
         )
         rotated = rotate(rect, theta, origin=(0, 0))
         return translate(rotated, x, y)
+    
+    def show_goal_with_arrow(self, goal_state):
+        """
+        Draws the goal position with an arrow indicating the required heading.
+        goal_state: (x, y, theta_degrees)
+        """
+        gx, gy, gtheta = goal_state
+        
+        # Convert degrees to radians for math functions
+        rad = math.radians(gtheta)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+        
+        # Draw the goal point
+        plt.plot(gx, gy, 'go', markersize=10, label='Goal')
+        
+        # Draw the heading arrow (Quiver)
+        # pivot='middle' puts the center of the arrow on the coordinate
+        plt.quiver(gx, gy, dx, dy, color='green', scale=10, width=0.015, pivot='middle')
 
     def update(self, current_pos, costHistory, obstacles, goal):
         """Refreshes the plot with current progress."""
@@ -56,6 +76,8 @@ class PlannerVisualizer:
         # 3. Draw Current Vehicle Position
         cx, cy, ct = current_pos
         poly = self._create_vehicle_polygon(cx, cy, ct)
+
+        self.show_goal_with_arrow(goal)
         ex_x, ex_y = poly.exterior.xy
         self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
 
@@ -70,6 +92,7 @@ class PlannerVisualizer:
         """Final draw that stops the script from closing."""
         plt.ioff()  # Turn off interactive mode
         self.update(path[-1], costHistory, obstacles, goal)  # Update to last state
+        
 
         # Now draw the full completed blue path over the final frame
         if path:

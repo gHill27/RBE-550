@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 
-from shapely.geometry import box, Polygon
+from shapely.geometry import box, Polygon, Point
 from shapely.affinity import rotate, translate
 from shapely.ops import unary_union
 from typing import TypeAlias, Optional, Tuple, List
@@ -88,8 +88,9 @@ class Delivery(Vehicle):
         self.full_obstacle_geometry: Optional[Polygon] = None
         self.exploredNodes: dict[State, State] = {}
         self.start_pos: State = startPose  # (x,y,theta)
+        self.goal_state: State = (10,10,60)
         self.prepare_obstacles(self.map.obstacle_coordinate_list)
-        pass
+        
 
     def prepare_obstacles(self, obstacle_List: List[Tuple[int, int]]):
         """
@@ -107,7 +108,7 @@ class Delivery(Vehicle):
         # Combine all boxes into one complex shape (highly optimized for checking)
         self.full_obstacle_geometry = unary_union(polys)
 
-    def plan(self, goal: State, step_size: int = 2000, step_distance : float = 0.5) -> Optional[List[State]]:
+    def plan(self, goal: State, step_size: int = 500, step_distance : float = 0.5) -> Optional[List[State]]:
         """
         Performs an A* search on the state lattice.
 
@@ -140,7 +141,7 @@ class Delivery(Vehicle):
             _, current_state = heapq.heappop(open_list)
 
             # Check if we are "close enough" to the goal (floating point friendly)
-            if self.calculate_heurisitic(current_state, goal) < 0.1:
+            if self.is_near_goal(current_state,goal):
                 print("Goal Reached!")
                 self.exploredNodes = came_from
                 final_path = self.reconstruct_path(came_from, current_state)
@@ -149,7 +150,7 @@ class Delivery(Vehicle):
                         final_path,
                         costHistory,
                         self.map.obstacle_coordinate_list,
-                        self.map.goal_pos,
+                        goal,
                     )
                 return final_path
 
@@ -169,16 +170,29 @@ class Delivery(Vehicle):
                     raw_neighbor[2],
                 )
 
+                snapped_neighbor = self.snap_to_grid(raw_neighbor)
                 # if (math.floor(neighbor[0]),math.floor(neighbor[1])) in self.map.obstacle_coordinate_list and 0 < neighbor[0] < 12 and 0 < neighbor[1] < 12:
                 #     continue
+                # Inside the motion primitive loop
                 if not self.is_state_valid(raw_neighbor):
-                    continue  # Skip: The robot hits a wall at this specific angle
+                    continue
+                else:
+                    # center_point = Point((snapped_neighbor[0], snapped_neighbor[1]))
+                    # if self.full_obstacle_geometry.distance(center_point) <1.0:
+                    #     # 2. Proximity Penalty
+                    #     # We calculate how close the footprint is to the obstacles
+                    #     footprint = self.get_footprint(*raw_neighbor)
+                    #     dist_to_obs = footprint.distance(self.full_obstacle_geometry)
+                    #     THRESHOLD = 0.5 
+                    #     # This creates a linear penalty: the closer to the wall, the higher the cost
+                    #     proximity_penalty = max(0,(THRESHOLD - dist_to_obs) * 1.5)
+                    # else:
+                    proximity_penalty = 0.0
 
-                snapped_neighbor = self.snap_to_grid(raw_neighbor)
 
                 # Assume constant cost of (step_distance) for each primitive
-                turn_penalty = 0.05 if raw_neighbor[2] != current_state[2] else 0.0
-                tentativeCostToCome = costHistory[current_state] + step_distance + turn_penalty
+                turn_penalty = 0.15 if raw_neighbor[2] != current_state[2] else 0.0
+                tentativeCostToCome = costHistory[current_state] + step_distance + turn_penalty + proximity_penalty
 
                 if (
                     snapped_neighbor not in costHistory
@@ -197,7 +211,7 @@ class Delivery(Vehicle):
                     raw_neighbor,
                     costHistory,
                     self.map.obstacle_coordinate_list,
-                    self.map.goal_pos,
+                    goal,
                 )
             count += 1
 
@@ -217,7 +231,24 @@ class Delivery(Vehicle):
             path.append(current)
         return path[::-1]  # Return reversed path
 
-    def calculate_heurisitic(self, pose: State, goal: State) -> float:
+    def is_near_goal(self, state:State, goal:State, pos_threshold = 0.2, angle_threshold = 10):
+        """
+        Checks if the robot is close enough to the goal in both position and heading.
+        """
+        curr_x, curr_y, curr_theta = state
+        goal_x, goal_y, goal_theta = goal
+        
+        # 1. Position Check (Euclidean)
+        dist = math.sqrt((curr_x - goal_x)**2 + (curr_y - goal_y)**2)
+        
+        # 2. Orientation Check
+        # We use a modular difference to handle 0/360 degree wrap-around
+        angle_diff = abs((curr_theta - goal_theta + 180) % 360 - 180)
+        
+        return dist <= pos_threshold and angle_diff <= angle_threshold
+    
+
+    def calculate_heurisitic(self, pose: State, goal: State, weight:float = 1, heading_weight:float = 1.5) -> float:
         """
         Estimates the cost to reach the goal using Euclidean distance.
 
@@ -228,8 +259,16 @@ class Delivery(Vehicle):
         cost = round(
             sqrt((goal[0] - pose[0]) ** 2 + (goal[1] - pose[1]) ** 2),
             2,
-        )
-        return cost
+            )
+        
+            # If we are close to the goal, start caring about the angle
+        if cost < 1.0:
+            angle_diff = abs((pose[2] - goal[2] + 180) % 360 - 180)
+            # Normalize angle diff so it doesn't overpower the distance
+            # (e.g., 180 degrees = 1.0 units of distance)
+            return (cost + (angle_diff / 180.0)) * heading_weight
+            
+        return cost * weight
 
     def calculate_motion_primitives(
         self,step_distance, step_precision: int = 16
@@ -311,7 +350,7 @@ class Delivery(Vehicle):
 
     def main_run(self):
         # Run the planner
-        path = self.plan((self.map.goal_pos[0], self.map.goal_pos[1], 0))
+        path = self.plan((self.map.goal_pos[0], self.map.goal_pos[1], 90))
 
 
 class Police(Vehicle):
