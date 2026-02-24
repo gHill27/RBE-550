@@ -16,14 +16,14 @@ class Map:
     def __init__(self, Grid_num, cell_size, fill_percent: float):
         # each cell is 3 meters by 3 meters in real distance
         self.grid_num = Grid_num
+        self.cell_size = cell_size
         self.fill_percent = fill_percent
         # self.renderer = Renderer(Grid_num, cell_size, fill_percent)
         self.obstacle_coordinate_list = []
         self.is_map_full = False
-        self.enemy_list = []  # to be updated
         self.goal_pos: Optional[tuple[float, float]] = None  # to be updated
-        self._generate_goal()
         self._fill_map()
+        self._generate_goal()
 
     def check_valid_cell(self, coordinate):
         """
@@ -32,19 +32,12 @@ class Map:
         This is intended be a safety check to ensure smooth motion
         """
         row, col = coordinate
-        retval = True
-
-        # inside grid
-        if row <= 0 or row >= self.grid_num:
-            retval = False
-        if col <= 0 or col >= self.grid_num:
-            retval = False
-
-        # not an obstacle
+        # Ensure we stay within the discrete grid bounds (0-11 for a 12x12)
+        if not (0 <= row < self.grid_num and 0 <= col < self.grid_num):
+            return False
         if (row, col) in self.obstacle_coordinate_list:
-            retval = False
-
-        return retval
+            return False
+        return True
 
     def append_new_obstacle(self, coordinate):
         self.obstacle_coordinate_list.append(coordinate)
@@ -78,103 +71,83 @@ class Map:
             return new_coordinate
 
     def check_cell_occupied(self, new_coordinate):
-        retval = False
+        """CRITICAL: Added 'return' statements here"""
         if new_coordinate in self.obstacle_coordinate_list or new_coordinate == (0, 0):
-            retval = True
-        elif new_coordinate == self.goal_pos:
-            retval = True
+            return True
+        if self.goal_pos:
+            # Check if this grid cell contains the goal
+            goal_grid = (
+                int(self.goal_pos[0] / self.cell_size),
+                int(self.goal_pos[1] / self.cell_size),
+            )
+            if new_coordinate == goal_grid:
+                return True
+        return False  # Ensure we return False if free
 
     def _generate_goal(self):
-        # TODO: fix implementation, goal can be inside an obstacle.
-        test_goal_coordinate = self.find_open_square()
-        if self.check_cell_occupied(test_goal_coordinate):
-            self._generate_goal()
-        else:
+        """Generates a goal in a free cell and converts to world meters"""
+        # 1. Find a random grid coordinate that isn't an obstacle
+        all_coords = [
+            (r, c) for r in range(self.grid_num) for c in range(self.grid_num)
+        ]
+        free_coords = [c for c in all_coords if c not in self.obstacle_coordinate_list]
+
+        if not free_coords:
             self.goal_pos = (
-                test_goal_coordinate[0] + 0.5,
-                test_goal_coordinate[1] + 0.5,
+                self.grid_num * self.cell_size / 2,
+                self.grid_num * self.cell_size / 2,
             )
-            # self.renderer.color_cell(
-            # self.goal_pos, "green"
-            #     )
+            return
+
+        target_cell = random.choice(free_coords)
+
+        # 2. Convert grid index to real-world meters
+        # Center of cell (row, col) is (row * 3 + 1.5, col * 3 + 1.5)
+        self.goal_pos = (
+            (target_cell[0] * self.cell_size) + (self.cell_size / 2),
+            (target_cell[1] * self.cell_size) + (self.cell_size / 2),
+        )
 
     def check_on_grid(self, coord):
         return 0 < coord[0] < self.grid_num and 0 < coord[1] < self.grid_num
 
     def generate_field_obstacle(self, shape, attempts=0):
-        THREE_TALL = 1
-        UPSIDEDOWN_L = 2
-        TETRIS = 3
-        HALF_PLUS = 4
-        if attempts > 1000:
-            print("over 1000 attempts trailed no place found")
+        if attempts > 100:  # Reduced for smaller grids
             self.is_map_full = True
             return
-        coordinate = self.find_open_square()
-        # print(coordinate)
-        x_cord = coordinate[0]
-        y_cord = coordinate[1]
-        coord_list = []
-        if shape == THREE_TALL:  # boundary check for each shape
-            if 0 < y_cord + 1 < self.grid_num and 0 < y_cord - 1 < self.grid_num:
-                above_cord = (x_cord, y_cord - 1)
-                below_cord = (x_cord, y_cord + 1)
-                if self.check_cell_occupied(above_cord) or self.check_cell_occupied(
-                    below_cord
-                ):
-                    self.generate_field_obstacle(shape, attempts + 1)
-                else:
-                    coord_list = [above_cord, below_cord]
-                    coord_list.append((x_cord, y_cord))
 
-        elif shape == UPSIDEDOWN_L:
-            if x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128:
-                left_cord = (x_cord - 1, y_cord - 1)
-                above_cord = (x_cord, y_cord - 1)
-                below_cord = (x_cord, y_cord + 1)
-                if (
-                    self.check_cell_occupied(left_cord)
-                    or self.check_cell_occupied(above_cord)
-                    or self.check_cell_occupied(below_cord)
-                ):
-                    self.generate_field_obstacle(shape, attempts + 1)
-                else:
-                    coord_list = [left_cord, above_cord, below_cord]
-                    coord_list.append((x_cord, y_cord))
+        # Pick a random starting point for the tetromino
+        x, y = random.randint(0, self.grid_num - 1), random.randint(
+            0, self.grid_num - 1
+        )
 
-        elif shape == TETRIS:
-            if x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128:
-                top_left_cord = (x_cord - 1, y_cord - 1)
-                left_cord = (x_cord - 1, y_cord)
-                below_cord = (x_cord, y_cord + 1)
-                if (
-                    left_cord in self.obstacle_coordinate_list
-                    or top_left_cord in self.obstacle_coordinate_list
-                    or below_cord in self.obstacle_coordinate_list
-                ):
-                    self.generate_field_obstacle(shape, attempts + 1)
-                else:
-                    coord_list = [top_left_cord, left_cord, below_cord]
-                    coord_list.append((x_cord, y_cord))
+        # Logic for shapes (using grid indices)
+        # We replace the hardcoded '128' with self.grid_num
+        potential_coords = []
 
-        elif shape == HALF_PLUS:
-            if x_cord - 1 >= 0 and y_cord - 1 >= 0 and y_cord + 1 <= 128:
-                above_cord = (x_cord, y_cord - 1)
-                below_cord = (x_cord, y_cord + 1)
-                left_cord = (x_cord - 1, y_cord)
-                if (
-                    above_cord in self.obstacle_coordinate_list
-                    or below_cord in self.obstacle_coordinate_list
-                    or left_cord in self.obstacle_coordinate_list
-                ):
-                    self.generate_field_obstacle(shape, attempts + 1)
-                else:
-                    coord_list = [above_cord, below_cord, left_cord]
-                    coord_list.append((x_cord, y_cord))
+        if shape == 1:  # Three Tall
+            potential_coords = [(x, y), (x, y - 1), (x, y + 1)]
+        elif shape == 2:  # L-Shape
+            potential_coords = [(x, y), (x - 1, y - 1), (x, y - 1), (x, y + 1)]
+        elif shape == 3:  # Z-Shape
+            potential_coords = [(x, y), (x - 1, y - 1), (x - 1, y), (x, y + 1)]
+        elif shape == 4:  # T-Shape
+            potential_coords = [(x, y), (x, y - 1), (x, y + 1), (x - 1, y)]
 
-        for coordinate in coord_list:
-            self.obstacle_coordinate_list.append(coordinate)
-            # self.renderer.color_cell(coordinate)
+        # Validate all pieces of the shape fit and are not overlapping
+        valid = True
+        for pc in potential_coords:
+            if not (0 <= pc[0] < self.grid_num and 0 <= pc[1] < self.grid_num):
+                valid = False
+                break
+            if self.check_cell_occupied(pc):
+                valid = False
+                break
+
+        if valid:
+            self.obstacle_coordinate_list.extend(potential_coords)
+        else:
+            self.generate_field_obstacle(shape, attempts + 1)
 
     def _fill_map(self):
         while (
@@ -183,21 +156,6 @@ class Map:
             < self.grid_num * self.grid_num * self.fill_percent
         ):
             self.generate_field_obstacle(self.generate_random_tetromino())
-        # debug test
-        # print(f" length of obstacle list {len(self.obstacle_coordinate_list)}. the number of cells: {self.grid_num*self.grid_num}.")
-
-    def _remove_enities(self):
-        # removes all entities
-        pass
-
-    def update_characters(self):
-        """
-        Updates enemy and hero position and updates the current list
-
-        Should run every loop call to ensure proper display
-
-        """
-        pass
 
 
 if __name__ == "__main__":

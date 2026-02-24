@@ -41,21 +41,24 @@ def mock_delivery():
 # --- The Tests ---
 def test_terminal_heading_enforcement(mock_delivery):
     """
-    Tests that the planner continues to search until the 
+    Tests that the planner continues to search until the
     specified heading is achieved.
     """
     start = (5.0, 5.0, 0.0)
     # Goal is at the same spot but requires a 90-degree turn
     goal = (5.0, 5.0, 90.0)
-    
+
     path = mock_delivery.plan(goal=goal)
-    
+
     assert path is not None
     final_state = path[-1]
-    
+
     # Verify the final heading is within 10 degrees of the goal
     angle_diff = abs((final_state[2] - goal[2] + 180) % 360 - 180)
-    assert angle_diff <= 10, f"Final heading {final_state[2]} does not match goal {goal[2]}"
+    assert (
+        angle_diff <= 10
+    ), f"Final heading {final_state[2]} does not match goal {goal[2]}"
+
 
 def test_coordinate_binning(mock_delivery):
     """Verifies that two points 1mm apart are treated as the same state."""

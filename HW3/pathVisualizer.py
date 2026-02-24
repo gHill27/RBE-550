@@ -6,7 +6,12 @@ import math
 
 
 class PlannerVisualizer:
-    def __init__(self, title="Live State Lattice Planner", grid_size=12):
+    def __init__(
+        self,
+        vechile_size: tuple[float, float],
+        title="Live State Lattice Planner",
+        grid_size=36,
+    ):
         plt.ion()  # Turn on interactive mode
         self.fig, self.ax = plt.subplots(figsize=(8, 8))
         self.grid_size = grid_size
@@ -21,7 +26,9 @@ class PlannerVisualizer:
         self.ax.grid(True, linestyle=":", alpha=0.5)
 
         # Robot dimensions
-        self.v_width, self.v_height = 0.7, 0.57
+        self.v_width, self.v_height = (
+            vechile_size  # will be filled later by /change_vechile_size
+        )
 
     def _create_vehicle_polygon(self, x, y, theta):
         rect = box(
@@ -29,25 +36,25 @@ class PlannerVisualizer:
         )
         rotated = rotate(rect, theta, origin=(0, 0))
         return translate(rotated, x, y)
-    
+
     def show_goal_with_arrow(self, goal_state):
         """
         Draws the goal position with an arrow indicating the required heading.
         goal_state: (x, y, theta_degrees)
         """
         gx, gy, gtheta = goal_state
-        
+
         # Convert degrees to radians for math functions
         rad = math.radians(gtheta)
         dx = math.cos(rad)
         dy = math.sin(rad)
-        
+
         # Draw the goal point
-        plt.plot(gx, gy, 'go', markersize=10, label='Goal')
-        
+        plt.plot(gx, gy, "go", markersize=10, label="Goal")
+
         # Draw the heading arrow (Quiver)
         # pivot='middle' puts the center of the arrow on the coordinate
-        plt.quiver(gx, gy, dx, dy, color='green', scale=10, width=0.015, pivot='middle')
+        plt.quiver(gx, gy, dx, dy, color="green", scale=10, width=0.015, pivot="middle")
 
     def update(self, current_pos, costHistory, obstacles, goal):
         """Refreshes the plot with current progress."""
@@ -56,14 +63,21 @@ class PlannerVisualizer:
         # Re-apply static settings after clear
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        self.ax.invert_yaxis()
         self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.3)
 
         # 1. Draw Obstacles
+        cell_size = 3  # Scale factor
         for row, col in obstacles:
-            rect = patches.Rectangle((row, col), 1, 1, color="dimgray")
+            # Scale grid index (row, col) to world meters
+            world_x = row * cell_size
+            world_y = col * cell_size
+
+            # Draw a 3x3 square instead of a 1x1 square
+            rect = patches.Rectangle(
+                (world_x, world_y), cell_size, cell_size, color="dimgray"
+            )
             self.ax.add_patch(rect)
 
         # 2. Draw Explored Nodes (Lattice)
@@ -92,7 +106,6 @@ class PlannerVisualizer:
         """Final draw that stops the script from closing."""
         plt.ioff()  # Turn off interactive mode
         self.update(path[-1], costHistory, obstacles, goal)  # Update to last state
-        
 
         # Now draw the full completed blue path over the final frame
         if path:
