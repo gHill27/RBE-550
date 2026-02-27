@@ -69,7 +69,7 @@ class Vehicle(ABC):
         )
 
     def plan(
-        self, goal: State, step_size: int = 500, step_distance: float = 2
+        self, goal: State, step_size: int = 150, step_distance: float = 0.5
     ) -> Optional[List[State]]:
         """
         Performs an A* search on the state lattice.
@@ -123,14 +123,16 @@ class Vehicle(ABC):
             for raw_neighbor in neighbors:
 
                 # creates bins for less repeated checks
-                snapped_neighbor = self.snap_to_grid(raw_neighbor)
+                snapped_neighbor = self.snap_to_grid(raw_neighbor,res=(step_distance*0.4))
 
                 # checks if the state is valid using raw neighbor
                 if not self.is_state_valid(raw_neighbor):
                     continue
 
                 # Assume constant cost of (step_distance) for each primitive
-                turn_penalty = 0.15 if raw_neighbor[2] != current_state[2] else 0.0
+                # Penalize the magnitude of the turn
+                angle_diff = abs((raw_neighbor[2] - current_state[2] + 180) % 360 - 180)
+                turn_penalty = (angle_diff / 15.0) * 0.2  # Scaled penalty
                 tentativeCostToCome = (
                     costHistory[current_state] + step_distance + turn_penalty
                 )
@@ -173,7 +175,7 @@ class Vehicle(ABC):
         return path[::-1]  # Return reversed path
 
     def snap_to_grid(
-        self, state: tuple[float, float, float], res=0.1, angle_res=22.5
+        self, state: tuple[float, float, float], res, angle_res=22.5
     ) -> tuple:
         """
         Discretizes a continuous state into a hashable 'bin' for the A* dictionaries.
@@ -191,13 +193,14 @@ class Vehicle(ABC):
         # Rounding to the nearest multiple of the resolution
         snapped_x = round(x / res) * res
         snapped_y = round(y / res) * res
-        snapped_theta = round(theta / angle_res) * angle_res
+        snapped_theta = (round(theta / angle_res) * angle_res) % 360
+        
 
         # We return a tuple of rounded values to use as a dictionary key
-        return (round(snapped_x, 2), round(snapped_y, 2), round(snapped_theta, 2))
+        return (round(snapped_x, 1), round(snapped_y, 1), round(snapped_theta, 1))
 
     def is_near_goal(
-        self, state: State, goal: State, pos_threshold=0.2, angle_threshold=10
+        self, state: State, goal: State, pos_threshold=0.4, angle_threshold=15
     ):
         """
         Checks if the robot is close enough to the goal in both position and heading.
@@ -215,7 +218,7 @@ class Vehicle(ABC):
         return dist <= pos_threshold and angle_diff <= angle_threshold
 
     def calculate_heurisitic(
-        self, pose: State, goal: State, weight: float = 2, heading_weight: float = 1.5
+        self, pose: State, goal: State, weight: float = 1.2, heading_weight: float = 0.5
     ) -> float:
         """
         Estimates the cost to reach the goal using Euclidean distance.
@@ -230,7 +233,7 @@ class Vehicle(ABC):
         )
 
         # If we are close to the goal, start caring about the angle
-        if cost < 1.0:
+        if cost < 5.0:
             angle_diff = abs((pose[2] - goal[2] + 180) % 360 - 180)
             # Normalize angle diff so it doesn't overpower the distance
             # (e.g., 180 degrees = 1.0 units of distance)
@@ -316,134 +319,9 @@ class Vehicle(ABC):
         self.full_obstacle_geometry = unary_union(polys)
 
 
-class Delivery(Vehicle):
-    """
-    A specific implementation of a Delivery robot using A* State Lattice.
-    """
-
-    def __init__(self, startPose: State, goalPose: State, map: Map = None, plot=False):
-        super().__init__(
-            height=0.7,
-            width=0.57,
-            startState=startPose,
-            goalState=goalPose,
-            map=map,
-            plot=plot,
-        )
-        # if a map doesn't exist create one
-
-    def get_neighbors(
-        self, current_state: State, motion_primatives: dict[float, tuple[float, float]]
-    ) -> List[State]:
-        """
-        Generates possible neighboring states
-        """
-        neighbors = []
-        for key, value in motion_primatives.items():
-            dx, dy, dtheta = value[0], value[1], value[2]
-            raw_neighbor = (
-                current_state[0] + dx,
-                current_state[1] + dy,
-                dtheta,
-            )
-            neighbors.append(raw_neighbor)
-        return neighbors
-
-    def calculate_motion_primitives(
-        self, step_distance: float, step_precision: int = 16
-    ) -> dict[float, tuple[float, float]]:
-        """
-        Generates possible (dx, dy) moves for a set number of headings.
-        """
-        motion_primatives = {}
-        for i in range(step_precision):
-            angle = 0 + i * (360 / step_precision)
-            coordinate = self.motion_primitive_equation(angle, step_distance)
-            motion_primatives[angle] = State(coordinate[0], coordinate[1], angle)
-        return motion_primatives
-
-    def motion_primitive_equation(
-        self, angle: float, distance_traveled: float
-    ) -> tuple[float]:
-        angle_rad = math.radians(angle)
-        point = (
-            round(distance_traveled * cos(angle_rad), 2),
-            round(distance_traveled * sin(angle_rad), 2),
-        )
-        return point
-
-    def main_run(self):
-        # Run the planner
-        path = self.plan((self.goal_state))
 
 
-class Police(Vehicle):
-    def __init__(self, startPose, goalPose, map, plot):
-        super().__init__(
-            width=5.2,
-            height=1.8,
-            startState=startPose,
-            goalState=goalPose,
-            map=map,
-            plot=plot,
-        )
-
-    def calculate_motion_primitives(self, step_distance, step_precision=5):
-        mp = {}
-        L = 2.7  # wheel base in meters TODO: CHANGE TO MATCH ACTUAL VALUE
-
-        # implementing 5 drive options: Hard left, slight left, Straight, slight right, Hard right
-        steering_angles = [-30, -15, 0, 15, 30]
-        for phi in steering_angles:
-            if abs(phi) == 0:
-                mp[phi] = (step_distance, 0, 0)
-            else:
-                # simplified integration
-                d_theta = round((step_distance / L) * math.tan(math.radians(phi)), 2)
-                dx = round(step_distance * math.cos(d_theta / 2), 2)
-                dy = round(step_distance * math.sin(d_theta / 2), 2)
-                mp[phi] = (dx, dy, round(math.degrees(d_theta), 2))
-        return mp
-
-    def get_neighbors(
-        self, current_state: State, motion_primatives: dict[float, tuple[float, float]]
-    ) -> List[State]:
-        """
-        Generates possible neighboring states
-        """
-        # prepreforming expensive cos/sin calculation
-        cos = math.cos(math.radians(current_state[2]))
-        sin = math.sin(math.radians(current_state[2]))
-
-        neighbors = []
-        for key, value in motion_primatives.items():
-            dx, dy, dtheta = value[0], value[1], value[2]
-
-            rotated_dx = dx * cos - dy * sin
-            rotated_dy = dx * sin + dy * cos
-            raw_neighbor = (
-                current_state[0] + rotated_dx,
-                current_state[1] + rotated_dy,
-                (current_state[2] + dtheta) % 360,
-            )
-            neighbors.append(raw_neighbor)
-        return neighbors
-
-    def main_run(self):
-        # Run the planner
-
-        path = self.plan((self.goal_state))
 
 
-class Truck(Vehicle):
-    def __init__(self, startState):
-        super().__init__(height=5.4, width=2.0, startState=startState)
 
 
-if __name__ == "__main__":
-    # Add this to your __main__ to debug
-    police_car = Police(
-        startPose=(5, 5, 0), goalPose=(25, 25, 45), map=Map(12, 3, 0), plot=True
-    )
-    print(f"Is Start Valid? {police_car.is_state_valid(police_car.start_pos)}")
-    police_car.main_run()

@@ -6,7 +6,6 @@ import random
 
 from enum import Enum
 
-from render import Renderer
 from collections import deque
 from typing import Optional
 
@@ -72,7 +71,7 @@ class Map:
 
     def check_cell_occupied(self, new_coordinate):
         """CRITICAL: Added 'return' statements here"""
-        if new_coordinate in self.obstacle_coordinate_list or new_coordinate == (0, 0):
+        if new_coordinate in self.obstacle_coordinate_list or new_coordinate in [(0, 0),(1,0),(0,1),(1,1)]:
             return True
         if self.goal_pos:
             # Check if this grid cell contains the goal

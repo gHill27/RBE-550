@@ -1,8 +1,13 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.animation as animation
+
+
 from shapely.geometry import box
 from shapely.affinity import rotate, translate
 import math
+from typing import List
+
 
 
 class PlannerVisualizer:
@@ -20,8 +25,8 @@ class PlannerVisualizer:
         # Setup the static grid once
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        self.ax.invert_yaxis()
-        self.ax.xaxis.tick_top()
+        #self.ax.invert_yaxis()
+        #self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.5)
 
@@ -63,7 +68,7 @@ class PlannerVisualizer:
         # Re-apply static settings after clear
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        self.ax.xaxis.tick_top()
+        #self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.3)
 
@@ -121,3 +126,5 @@ class PlannerVisualizer:
 
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open
+
+    
