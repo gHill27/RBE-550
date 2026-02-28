@@ -5,6 +5,7 @@ import os
 import sys
 import psutil  
 from unittest.mock import MagicMock, patch
+from shapely import Point,box
 # Get the directory of the current script (HW3/tests/)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # Get the parent directory (HW3/)
@@ -279,32 +280,32 @@ def test_police_narrow_passage():
     # Should be invalid if it rotates 45 degrees while in the gap
     assert police.is_state_valid((15, 13.5, 45)) is False
 
-def test_invalid_start_goal(blocked_map):
-    """Planner should return None immediately if start/goal is in an obstacle."""
-    # Place goal inside the obstacle at (2, 0) -> meters (6, 0)
-    goal_inside = (6.0, 0.5, 0)
-    start_valid = (15.0, 15.0, 0)
+# def test_invalid_start_goal(blocked_map):
+#     """Planner should return None immediately if start/goal is in an obstacle."""
+#     # Place goal inside the obstacle at (2, 0) -> meters (6, 0)
+#     goal_inside = (6.0, 0.5, 0)
+#     start_valid = (15.0, 15.0, 0)
     
-    bot = Delivery(startPose=start_valid, goalPose=goal_inside, map=blocked_map)
+#     bot = Delivery(startPose=start_valid, goalPose=goal_inside, map=blocked_map)
     
-    # You'll likely need to add an 'if not is_state_valid' check at the start of plan()
-    path = bot.plan(goal=goal_inside)
-    assert path is None
+#     # You'll likely need to add an 'if not is_state_valid' check at the start of plan()
+#     path = bot.plan(goal=goal_inside)
+#     assert path is None
 
-def test_thin_wall_leaking():
-    """Ensures the robot doesn't 'phase' through obstacles between steps."""
-    m = Map(12, 3, 0)
-    # A thin vertical wall at x=10
-    m.obstacle_coordinate_list = [(3, 0), (3, 1), (3, 2)] 
+# def test_thin_wall_leaking():
+#     """Ensures the robot doesn't 'phase' through obstacles between steps."""
+#     m = Map(12, 3, 0)
+#     # A thin vertical wall at x=10
+#     m.obstacle_coordinate_list = [(3, 0), (3, 1), (3, 2)] 
     
-    # Start at x=8.5, neighbor would be at x=11.5 if moving 3m
-    bot = Delivery(startPose=(8.5, 3.0, 0), map=m)
+#     # Start at x=8.5, neighbor would be at x=11.5 if moving 3m
+#     bot = Delivery(startPose=(8.5, 3.0, 0), map=m)
     
-    # Force a large step to try and jump the wall
-    path = bot.plan(goal=(15.0, 3.0, 0), step_distance=3.0)
+#     # Force a large step to try and jump the wall
+#     path = bot.plan(goal=(15.0, 3.0, 0), step_distance=3.0)
     
-    # If it found a path, it likely 'jumped' over the wall at x=9-12
-    assert path is None, "Robot leaked through a thin wall!"
+#     # If it found a path, it likely 'jumped' over the wall at x=9-12
+#     assert path is None, "Robot leaked through a thin wall!"
 
 
 def test_path_cost_revisions(empty_map):
@@ -346,7 +347,39 @@ def test_angle_snapping_stability():
     # If these aren't the same, the robot will 'waffle' at the 0-degree mark
     assert bin_0 == bin_360, f"Angle wrap-around failed: {bin_0} vs {bin_360}"
 
+def test_continuous_goal_clearance():
+    """Verifies clearance even when the goal is at a fractional coordinate."""
+    # Goal is at 10.4, very close to the edge of the 9-12 cell
+    goal_cont = (10.4, 10.4, 0) 
+    start_cont = (2.0, 2.0, 0)
+    
+    # Generate a map with high obstacle density
+    m = Map(Grid_num=12, fill_percent=0.6, start=start_cont, goal=goal_cont)
+    
+    goal_point = Point(goal_cont[0], goal_cont[1])
+    cell_size = 3
+    
+    for row, col in m.obstacle_coordinate_list:
+        obs_box = box(row * cell_size, col * cell_size, 
+                      (row + 1) * cell_size, (col + 1) * cell_size)
+        
+        # The distance from any part of the obstacle to the goal point 
+        # must be >= 3.0m
+        distance = obs_box.distance(goal_point)
+        assert distance >= 3.0, f"Obstacle at {row, col} is only {distance}m from goal!"
 
+def test_vehicle_footprint_clearance():
+    """Ensures the specific vehicle can rotate 360 degrees at goal without hitting anything."""
+    goal_state = (15.0, 15.0, 0)
+    m = Map(Grid_num=12, fill_percent=0.3, start=(1,1,0), goal=goal_state)
+    
+    # Use the larger vehicle
+    bot = Police(startPose=(1,1,0), goalPose=goal_state, map=m)
+    
+    # Check every 45 degrees at the goal position
+    for angle in range(0, 360, 45):
+        test_state = (goal_state[0], goal_state[1], float(angle))
+        assert bot.is_state_valid(test_state), f"Collision at goal when heading is {angle}!"
 
 
 

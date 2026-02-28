@@ -63,5 +63,5 @@ class Police(Vehicle):
         if path:
             print("Starting Simulation...")
             sim = PathSimulator(self, path)
-            sim.run(velocity=3.0)  # Adjust speed here
+            sim.run(velocity=6.0)  # Adjust speed here
         #path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=1)

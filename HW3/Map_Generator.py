@@ -9,6 +9,7 @@ from enum import Enum
 from collections import deque
 from typing import Optional
 
+from shapely import Point,box
 
 class Map:
 
@@ -24,6 +25,29 @@ class Map:
         self._fill_map()
         self._generate_goal()
 
+    def generate_safe_map(self, num_obstacles, start_pos, goal_pos, buffer_radius=3.0):
+        """
+        Generates obstacles while ensuring a continuous clearance zone.
+        """
+        safe_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
+        safe_goal = Point(goal_pos[0], goal_pos[1]).buffer(buffer_radius)
+        
+        final_obstacles = []
+        cell_size = 3
+        
+        # Logic to pick random row/cols
+        for row, col in candidate_coordinates:
+            # Create the physical box for this obstacle
+            obs_box = box(row * cell_size, col * cell_size, 
+                        (row + 1) * cell_size, (col + 1) * cell_size)
+            
+            # CONTINUOUS CHECK:
+            # If the box overlaps the 3m circle around start or goal, skip it.
+            if obs_box.intersects(safe_start) or obs_box.intersects(safe_goal):
+                continue
+                
+            final_obstacles.append((row, col))
+        return final_obstacles
     def check_valid_cell(self, coordinate):
         """
         This will be used to check if the hero has access to the square

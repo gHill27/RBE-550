@@ -1,5 +1,6 @@
 from Vehicles import Vehicle,State,Map
 from typing import Callable,List,Tuple
+from pathSimulator import PathSimulator
 import math
 from math import * 
 
@@ -62,4 +63,8 @@ class Delivery(Vehicle):
     def main_run(self):
         # Run the planner
         path = self.plan(self.goal_state,step_distance=0.3)
+        if path:
+            print("Starting Simulation...")
+            sim = PathSimulator(self, path)
+            sim.run(velocity=6.0)  # Adjust speed here
         # path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=0.3)

@@ -69,7 +69,7 @@ class Vehicle(ABC):
         )
 
     def plan(
-        self, goal: State, step_size: int = 150, step_distance: float = 0.5
+        self, goal: State, step_size: int = 1000, step_distance: float = 0.5
     ) -> Optional[List[State]]:
         """
         Performs an A* search on the state lattice.
@@ -233,7 +233,7 @@ class Vehicle(ABC):
         )
 
         # If we are close to the goal, start caring about the angle
-        if cost < 5.0:
+        if cost < 1.0:
             angle_diff = abs((pose[2] - goal[2] + 180) % 360 - 180)
             # Normalize angle diff so it doesn't overpower the distance
             # (e.g., 180 degrees = 1.0 units of distance)
