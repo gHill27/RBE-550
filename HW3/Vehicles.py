@@ -58,6 +58,7 @@ class Vehicle(ABC):
         self.exploredNodes: dict[State, State] = {}
         self.start_pos: State = startState  # (x,y,theta)
         self.goal_state: State = goalState
+        self.map.generate_safe_map(startState,goalState)
         self.prepare_obstacles(self.map.obstacle_coordinate_list)
         if plot:
             self.viz = PlannerVisualizer((width, height))

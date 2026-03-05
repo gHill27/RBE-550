@@ -21,20 +21,28 @@ class Map:
         # self.renderer = Renderer(Grid_num, cell_size, fill_percent)
         self.obstacle_coordinate_list = []
         self.is_map_full = False
-        self.goal_pos: Optional[tuple[float, float]] = None  # to be updated
-        self._fill_map()
-        self._generate_goal()
+        self.goal_pos: Optional[tuple[float, float, float]] = None  # to be updated
+        self.obstacle_coordinate_list = []
+        #self._generate_goal()
 
-    def generate_safe_map(self, num_obstacles, start_pos, goal_pos, buffer_radius=3.0):
+
+    def update_goal(self,goal:tuple[float,float,float]):
+        self.goal_pos = goal
+
+    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=3.0):
         """
         Generates obstacles while ensuring a continuous clearance zone.
         """
+        self.update_goal(goal_pos)
+
         safe_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
         safe_goal = Point(goal_pos[0], goal_pos[1]).buffer(buffer_radius)
         
         final_obstacles = []
         cell_size = 3
-        candidate_coordinates = [] #TODO fill in this later
+
+        candidate_coordinates = self._fill_map()
+        print(candidate_coordinates)
         # Logic to pick random row/cols
         for row, col in candidate_coordinates:
             # Create the physical box for this obstacle
@@ -47,7 +55,8 @@ class Map:
                 continue
                 
             final_obstacles.append((row, col))
-        return final_obstacles
+        self.obstacle_coordinate_list = final_obstacles
+    
     def check_valid_cell(self, coordinate):
         """
         This will be used to check if the hero has access to the square
@@ -136,7 +145,7 @@ class Map:
     def generate_field_obstacle(self, shape, attempts=0):
         if attempts > 100:  # Reduced for smaller grids
             self.is_map_full = True
-            return
+            return None
 
         # Pick a random starting point for the tetromino
         x, y = random.randint(0, self.grid_num - 1), random.randint(
@@ -167,18 +176,22 @@ class Map:
                 break
 
         if valid:
-            self.obstacle_coordinate_list.extend(potential_coords)
+            return potential_coords
         else:
-            self.generate_field_obstacle(shape, attempts + 1)
+            return self.generate_field_obstacle(shape, attempts + 1)
 
     def _fill_map(self):
+        obstacle_list = []
         while (
             not self.is_map_full
-            and len(self.obstacle_coordinate_list)
+            and len(obstacle_list)
             < self.grid_num * self.grid_num * self.fill_percent
         ):
-            self.generate_field_obstacle(self.generate_random_tetromino())
+            obstacles = (self.generate_field_obstacle(self.generate_random_tetromino()))
+            if obstacles:
+                obstacle_list.extend(obstacles)
+
+        return obstacle_list
+           
 
 
-if __name__ == "__main__":
-    pass
