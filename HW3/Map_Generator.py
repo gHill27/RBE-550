@@ -34,7 +34,7 @@ class Map:
         
         final_obstacles = []
         cell_size = 3
-        
+        candidate_coordinates = [] #TODO fill in this later
         # Logic to pick random row/cols
         for row, col in candidate_coordinates:
             # Create the physical box for this obstacle
@@ -94,7 +94,6 @@ class Map:
             return new_coordinate
 
     def check_cell_occupied(self, new_coordinate):
-        """CRITICAL: Added 'return' statements here"""
         if new_coordinate in self.obstacle_coordinate_list or new_coordinate in [(0, 0),(1,0),(0,1),(1,1)]:
             return True
         if self.goal_pos:
