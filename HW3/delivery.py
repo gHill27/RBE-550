@@ -9,7 +9,7 @@ class Delivery(Vehicle):
     A specific implementation of a Delivery robot using A* State Lattice.
     """
 
-    def __init__(self, startPose: State, goalPose: State = None, map: Map = None, plot=False):
+    def __init__(self, startPose: State, goalPose: State, map: Map = None, plot=False):
         super().__init__(
             height=0.7,
             width=0.57,

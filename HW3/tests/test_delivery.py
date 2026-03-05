@@ -18,6 +18,9 @@ from police import Police
 from delivery import Delivery  
 
 # --- FIXTURES ---
+@pytest.fixture
+def goal_State():
+    return (30.0,30.0,0.0)
 
 @pytest.fixture
 def empty_map():
@@ -33,9 +36,9 @@ def blocked_map():
 
 # --- GEOMETRIC & BOUNDARY TESTS ---
 
-def test_boundary_detection(empty_map):
+def test_boundary_detection(empty_map,goal_State):
     """Checks if the vehicle recognizes world boundaries."""
-    bot = Delivery(startPose=(1, 1, 0), map=empty_map)
+    bot = Delivery(startPose=(1, 1, 0),goalPose=goal_State ,map=empty_map)
     
     # Clearly inside
     assert bot.is_state_valid((5, 5, 0)) is True
@@ -44,14 +47,14 @@ def test_boundary_detection(empty_map):
     # Negative coordinates
     assert bot.is_state_valid((-1, 5, 0)) is False
 
-def test_police_footprint_vs_delivery(empty_map):
+def test_police_footprint_vs_delivery(empty_map,goal_State):
     """Tests that the Police car's larger size triggers collisions where the Delivery bot is safe."""
     # Create an obstacle at (6, 6) grid -> (18, 18) meters
     m = Map(12, 3, 0)
     m.obstacle_coordinate_list = [(6, 6)]
     
-    deliv = Delivery(startPose=(3, 3, 0), map=m)
-    police = Police(startPose=(3, 3, 0), map=m, plot=False)
+    deliv = Delivery(startPose=(3, 3, 0),goalPose=goal_State, map=m)
+    police = Police(startPose=(3, 3, 0),goalPose=goal_State, map=m, plot=False)
     deliv.prepare_obstacles(m.obstacle_coordinate_list)
     police.prepare_obstacles(m.obstacle_coordinate_list)
 
@@ -65,10 +68,10 @@ def test_police_footprint_vs_delivery(empty_map):
 
 # --- MOTION PRIMITIVE TESTS ---
 
-def test_ackermann_math():
+def test_ackermann_math(goal_State):
     """Verifies that the Police car heading change matches steering geometry."""
     m = Map(12, 3, 0)
-    police = Police(startPose=(10, 10, 0), map=m, plot=False)
+    police = Police(startPose=(10, 10, 0), goalPose=goal_State, map=m, plot=False)
     mp = police.calculate_motion_primitives(step_distance=1.0)
     
     # Steering 0 should have 0 d_theta
@@ -80,18 +83,18 @@ def test_ackermann_math():
 
 # --- PLANNER EFFICIENCY & EDGE CASES ---
 
-def test_unreachable_goal(blocked_map):
+def test_unreachable_goal(blocked_map,goal_State):
     """Ensures planner exits gracefully when no path exists."""
-    police = Police(startPose=(3, 3, 0), map=blocked_map, plot=False)
+    police = Police(startPose=(3, 3, 0), goalPose=goal_State, map=blocked_map, plot=False)
     # Goal is on the other side of the wall
     path = police.plan(goal=(30, 30, 0), step_distance=2.0)
     assert path is None
 
-def test_path_efficiency(empty_map):
+def test_path_efficiency(empty_map,goal_State):
     """Verifies that the path found is reasonably direct (A* optimality)."""
     start = (5, 5, 0)
     goal = (15, 5, 0)
-    bot = Delivery(startPose=start, map=empty_map)
+    bot = Delivery(startPose=start,goalPose=goal_State, map=empty_map)
     path = bot.plan(goal=goal, step_distance=1.0)
     
     assert path is not None
@@ -119,12 +122,12 @@ def test_plan_with_perfect_heuristic():
         # Even with a 0 heuristic, A* should find the goal via cost-to-come
 
 # 2. Testing Collision Logic by Mocking Shapely Geometries
-def test_is_state_valid_with_mocked_collision():
+def test_is_state_valid_with_mocked_collision(goal_State):
     """
     Force is_collision to return True to see if is_state_valid 
     correctly rejects the state.
     """
-    bot = Delivery(startPose=(5, 5, 0))
+    bot = Delivery(startPose=(5, 5, 0),goalPose=goal_State)
     
     # We mock the 'intersects' call on the footprint
     with patch('Vehicles.Polygon.intersects', return_value=True):
@@ -133,13 +136,13 @@ def test_is_state_valid_with_mocked_collision():
         assert bot.is_state_valid((5, 5, 0)) is False
 
 # 3. Testing get_neighbors rotation math
-def test_police_neighbor_rotation():
+def test_police_neighbor_rotation(goal_State):
     """
     Verify that get_neighbors correctly applies rotation 
     matrices to motion primitives.
     """
     m = MagicMock() # Mock the Map
-    police = Police(startPose=(0, 0, 90), map=m, plot=False) # Facing North
+    police = Police(startPose=(0, 0, 90), goalPose=goal_State, map=m, plot=False) # Facing North
     
     # Manually defined primitive: moving 1m 'forward' in local X
     mock_primitives = {0: (1.0, 0.0, 0.0)} 
@@ -154,7 +157,7 @@ def test_police_neighbor_rotation():
     assert res_theta == 90
 
 # 4. Mocking the Visualizer to ensure it doesn't slow down tests
-def test_visualizer_calls():
+def test_visualizer_calls(goal_State):
     """
     Ensure the visualizer's update function is called 
     the expected number of times during a plan.
@@ -163,7 +166,7 @@ def test_visualizer_calls():
         # Setup the mock instance
         instance = MockViz.return_value
         
-        bot = Delivery(startPose=(1, 1, 0), plot=True)
+        bot = Delivery(startPose=(1, 1, 0), goalPose=goal_State, plot=True)
         # Small distance, should hit goal quickly
         bot.plan(goal=(1.5, 1, 0), step_size=1) 
         
@@ -217,10 +220,10 @@ def test_planner_throughput_and_binning():
     # 3. Ensure a path was actually found
     assert path is not None
 
-def test_heading_normalization():
+def test_heading_normalization(goal_State):
     """Ensures the planner treats 359 and 1 degrees as 2 degrees apart."""
     m = Map(12, 3, 0)
-    bot = Delivery(startPose=(10, 10, 359), map=m)
+    bot = Delivery(startPose=(10, 10, 359), goalPose=goal_State, map=m)
     
     # Target a point slightly to the right of 359 (crossing 0)
     snapped_a = bot.snap_to_grid((10, 10, 359),res = 0.2)
@@ -230,13 +233,13 @@ def test_heading_normalization():
     # This test verifies your state representation doesn't create 'infinite' unique angles
     assert abs(snapped_a[2] - snapped_b[2]) <= 45.0 # Or your angular resolution
 
-def test_goal_tolerance_acceptance():
+def test_goal_tolerance_acceptance(goal_State):
     """Verifies the robot stops within a reasonable distance of the goal."""
     m = Map(12, 3, 0)
     start = (10, 10, 0)
     goal = (10.2, 10.2, 0) 
     
-    bot = Delivery(startPose=start, map=m)
+    bot = Delivery(startPose=start,goalPose=goal, map=m)
     path = bot.plan(goal=goal, step_distance=0.5)
     
     assert path is not None
@@ -248,10 +251,10 @@ def test_goal_tolerance_acceptance():
     # The final position should be within the robot's tolerance (e.g., 0.5m)
     assert dist_to_goal < 0.5, f"Robot ended too far from goal: {dist_to_goal}m"
 
-def test_police_minimum_turning_radius():
+def test_police_minimum_turning_radius(goal_State):
     """Ensures the Police car doesn't execute a turn tighter than physically possible."""
     m = Map(12, 3, 0)
-    police = Police(startPose=(10, 10, 0), map=m)
+    police = Police(startPose=(10, 10, 0),goalPose=goal_State, map=m)
     
     # Measure heading change over a 1.0m step at max steer
     # mp[30] is max left steer
@@ -263,7 +266,7 @@ def test_police_minimum_turning_radius():
     # If it's 90 degrees, the math is broken.
     assert max_turn_delta_theta < 20.0
 
-def test_police_narrow_passage():
+def test_police_narrow_passage(goal_State):
     """Tests if the Police car can navigate a gap barely wider than itself."""
     m = Map(12, 3, 0)
     # Create a vertical 'gate' at x=15
@@ -272,7 +275,7 @@ def test_police_narrow_passage():
         (5, 3), (5, 5) # Obstacles at x=15, y=12 and x=15, y=18
     ]
     
-    police = Police(startPose=(0, 13.5, 0), map=m)
+    police = Police(startPose=(0, 13.5, 0),goalPose=goal_State, map=m)
     police.prepare_obstacles(m.obstacle_coordinate_list)
     
     # Should be valid when perfectly centered and straight
@@ -308,12 +311,12 @@ def test_police_narrow_passage():
 #     assert path is None, "Robot leaked through a thin wall!"
 
 
-def test_path_cost_revisions(empty_map):
+def test_path_cost_revisions(empty_map,goal_State):
     """Verifies that A* updates a node if a cheaper path is found."""
     start = (10, 10, 0)
     # Place a goal where two primitives could reach it, one with more 'wobble'
     goal = (12, 10, 0)
-    bot = Delivery(startPose=start, map=empty_map)
+    bot = Delivery(startPose=start,goalPose=goal, map=empty_map)
     
     # We want to ensure that the final costHistory entry for the goal 
     # is the minimum possible cost, not just the first one found.
@@ -323,7 +326,7 @@ def test_path_cost_revisions(empty_map):
     # if tentativeCostToCome < costHistory[snapped_neighbor]:
     # This is the line that handles this case!
 
-def test_search_limit_exhaustion():
+def test_search_limit_exhaustion(goal_State):
     """Ensures the planner exits gracefully when a complex map has no solution."""
     m = Map(12, 3, 0.4) # Very dense map
     # Police car in a tight box
@@ -337,9 +340,9 @@ def test_search_limit_exhaustion():
     assert duration < 5.0 # Should not think for more than 5 seconds
     assert path is None
 
-def test_angle_snapping_stability():
+def test_angle_snapping_stability(goal_State):
     """Ensures 0 and 360 degrees snap to the same grid bin."""
-    bot = Delivery(startPose=(0,0,0))
+    bot = Delivery(startPose=(0,0,0),goalPose=goal_State)
     
     bin_0 = bot.snap_to_grid((10, 10, 0.1), res=0.5)
     bin_360 = bot.snap_to_grid((10, 10, 359.9), res=0.5)
@@ -354,7 +357,8 @@ def test_continuous_goal_clearance():
     start_cont = (2.0, 2.0, 0)
     
     # Generate a map with high obstacle density
-    m = Map(Grid_num=12, fill_percent=0.6, start=start_cont, goal=goal_cont)
+    m = Map(Grid_num=12, fill_percent=0.6, cell_size=3)
+    m.goal_pos = goal_cont
     
     goal_point = Point(goal_cont[0], goal_cont[1])
     cell_size = 3
@@ -371,7 +375,7 @@ def test_continuous_goal_clearance():
 def test_vehicle_footprint_clearance():
     """Ensures the specific vehicle can rotate 360 degrees at goal without hitting anything."""
     goal_state = (15.0, 15.0, 0)
-    m = Map(Grid_num=12, fill_percent=0.3, start=(1,1,0), goal=goal_state)
+    m = Map(Grid_num=12, fill_percent=0.3,cell_size=3)
     
     # Use the larger vehicle
     bot = Police(startPose=(1,1,0), goalPose=goal_state, map=m)
