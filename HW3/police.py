@@ -16,15 +16,17 @@ class Police(Vehicle):
             plot=plot,
         )
 
-    def calculate_motion_primitives(self, step_distance, step_precision=5):
+    def calculate_motion_primitives(self, step_distance):
         mp = {}
-        L = 2.7  # wheel base in meters TODO: CHANGE TO MATCH ACTUAL VALUE
+        L = 2.8  # wheel base in meters
 
         # implementing 5 drive options: Hard left, slight left, Straight, slight right, Hard right
-        steering_angles = [-30, -15, 0, 15, 30]
+        steering_angles = [-30, -15, 0, 15, 30, 180]
         for phi in steering_angles:
             if abs(phi) == 0:
                 mp[phi] = (step_distance, 0, 0)
+            elif phi == 180:
+                mp[phi] = (-step_distance, 0, 0)
             else:
                 # simplified integration
                 d_theta = round((step_distance / L) * math.tan(math.radians(phi)), 2)

@@ -51,10 +51,11 @@ def test_police_footprint_vs_delivery(empty_map,goal_State):
     """Tests that the Police car's larger size triggers collisions where the Delivery bot is safe."""
     # Create an obstacle at (6, 6) grid -> (18, 18) meters
     m = Map(12, 3, 0)
-    m.obstacle_coordinate_list = [(6, 6)]
     
     deliv = Delivery(startPose=(3, 3, 0),goalPose=goal_State, map=m)
     police = Police(startPose=(3, 3, 0),goalPose=goal_State, map=m, plot=False)
+
+    m.obstacle_coordinate_list = [(6, 6)]
     deliv.prepare_obstacles(m.obstacle_coordinate_list)
     police.prepare_obstacles(m.obstacle_coordinate_list)
 
@@ -62,7 +63,8 @@ def test_police_footprint_vs_delivery(empty_map,goal_State):
     # The Delivery bot (0.7m long) should be safe.
     # The Police car (5.2m long) should collide.
     test_pos = (16.0, 18.0, 0) 
-    
+
+    print(f"DEBUG: Obstacles in police memory: {police.map.obstacle_coordinate_list}")
     assert deliv.is_state_valid(test_pos) is True
     assert police.is_state_valid(test_pos) is False
 
@@ -271,11 +273,12 @@ def test_police_narrow_passage(goal_State):
     m = Map(12, 3, 0)
     # Create a vertical 'gate' at x=15
     # Car width is 1.8m. Gap is from y=14 to y=16 (2.0m wide)
+    
+    
+    police = Police(startPose=(0, 13.5, 0),goalPose=goal_State, map=m)
     m.obstacle_coordinate_list = [
         (5, 3), (5, 5) # Obstacles at x=15, y=12 and x=15, y=18
     ]
-    
-    police = Police(startPose=(0, 13.5, 0),goalPose=goal_State, map=m)
     police.prepare_obstacles(m.obstacle_coordinate_list)
     
     # Should be valid when perfectly centered and straight
