@@ -5,6 +5,7 @@ import matplotlib.animation as animation
 
 from shapely.geometry import box
 from shapely.affinity import rotate, translate
+from shapely.ops import unary_union
 import math
 from typing import List
 
@@ -16,11 +17,13 @@ class PlannerVisualizer:
         vechile_size: tuple[float, float],
         title="Live State Lattice Planner",
         grid_size=36,
+        vehicle = None
     ):
         plt.ion()  # Turn on interactive mode
         self.fig, self.ax = plt.subplots(figsize=(8, 8))
         self.grid_size = grid_size
         self.title = title
+        self.vehicle = vehicle
 
         # Setup the static grid once
         self.ax.set_xlim(0, self.grid_size)
@@ -35,19 +38,24 @@ class PlannerVisualizer:
             vechile_size  # will be filled later by /change_vechile_size
         )
 
-    def _create_vehicle_polygon(self, x, y, theta):
-        rect = box(
-            -self.v_width / 2, -self.v_height / 2, self.v_width / 2, self.v_height / 2
-        )
-        rotated = rotate(rect, theta, origin=(0, 0))
-        return translate(rotated, x, y)
+    def _create_vehicle_polygon(self, Pose):
+        if self.vehicle:
+            # We pass the coordinates to the Truck's get_footprint method
+            x,y,t,t1 = Pose
+            return self.vehicle.get_footprint(x,y,t,t1)
+        else:
+            rect = box(
+                -self.v_width / 2, -self.v_height / 2, self.v_width / 2, self.v_height / 2
+            )
+            rotated = rotate(rect, Pose[2], origin=(0, 0))
+            return translate(rotated, Pose[0],Pose[1])
 
     def show_goal_with_arrow(self, goal_state):
         """
         Draws the goal position with an arrow indicating the required heading.
         goal_state: (x, y, theta_degrees)
         """
-        gx, gy, gtheta = goal_state
+        gx, gy, gtheta = goal_state[:3]
 
         # Convert degrees to radians for math functions
         rad = math.radians(gtheta)
@@ -93,8 +101,16 @@ class PlannerVisualizer:
             self.ax.scatter(xs, ys, c="orange", s=1, alpha=0.5)
 
         # 3. Draw Current Vehicle Position
-        cx, cy, ct = current_pos
-        poly = self._create_vehicle_polygon(cx, cy, ct)
+        poly = self._create_vehicle_polygon(current_pos)
+
+        if poly.geom_type == 'Polygon':
+            geoms = [poly]
+        else:
+            geoms = poly.geoms
+
+        for p in geoms:
+            ex_x, ex_y = p.exterior.xy
+            self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
 
         self.show_goal_with_arrow(goal)
         ex_x, ex_y = poly.exterior.xy
@@ -118,8 +134,8 @@ class PlannerVisualizer:
             self.ax.plot(px, py, color="blue", linewidth=2, marker=".", zorder=10)
 
             # Draw the footprints for the final path one last time for clarity
-            for i, (x, y, theta) in enumerate(path):
-                poly = self._create_vehicle_polygon(x, y, theta)
+            for i, state in enumerate(path):
+                poly = self._create_vehicle_polygon(state)
                 ex_x, ex_y = poly.exterior.xy
                 alpha = 0.05 if i < len(path) - 1 else 0.8
                 self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
