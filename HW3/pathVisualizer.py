@@ -41,7 +41,8 @@ class PlannerVisualizer:
     def _create_vehicle_polygon(self, Pose):
         if self.vehicle:
             # We pass the coordinates to the Truck's get_footprint method
-            x,y,t,t1 = Pose
+            x,y,t, = Pose[:3]
+            t1 = Pose[3] if len(Pose) > 3 else t
             return self.vehicle.get_footprint(x,y,t,t1)
         else:
             rect = box(
@@ -130,15 +131,21 @@ class PlannerVisualizer:
 
         # Now draw the full completed blue path over the final frame
         if path:
-            px, py, _ = zip(*path)
+            # Unpack x, y regardless of whether path is 3D or 4D
+            px = [state[0] for state in path]
+            py = [state[1] for state in path]
             self.ax.plot(px, py, color="blue", linewidth=2, marker=".", zorder=10)
 
             # Draw the footprints for the final path one last time for clarity
             for i, state in enumerate(path):
-                poly = self._create_vehicle_polygon(state)
-                ex_x, ex_y = poly.exterior.xy
-                alpha = 0.05 if i < len(path) - 1 else 0.8
-                self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
+                # Draw every 5th footprint to keep it readable
+                if i % 5 == 0 or i == len(path) - 1:
+                    poly = self._create_vehicle_polygon(*state)
+                    geoms = [poly] if poly.geom_type == 'Polygon' else poly.geoms
+                    alpha = 0.05 if i < len(path) - 1 else 0.8
+                    for p in geoms:
+                        ex_x, ex_y = p.exterior.xy
+                        self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
 
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open

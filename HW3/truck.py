@@ -98,7 +98,7 @@ class Truck(Vehicle):
         # Trailer alignment (we want the trailer straight relative to truck)
         t1_diff = abs(self.normalize_angle(state[2] - state[3]))
         
-        return dist + (t0_diff * 1.5) + (t1_diff * 0.5)
+        return dist + (t0_diff * 0.15) + (t1_diff * 0.1)
     
     def calculate_motion_primitives(self, step_distance):
         pass
@@ -107,15 +107,15 @@ class Truck(Vehicle):
         x, y, t0, t1 = current_state
         psi = t0 - t1 
         neighbors = []
-
+        t0_rad,t1_rad,psi_rad = math.radians(t0),math.radians(t1), math.radians(psi)
         for phi in self.lut.steer_options:
             res = self.lut.get_primitive(psi, phi)
             if res:
                 dx, dy, lut_t0, lut_t1 = res # lut_t0 and lut_t1 are local headings
                 
                 # 1. Rotate the displacement into the world frame
-                world_dx = dx * math.cos(t0) - dy * math.sin(t0)
-                world_dy = dx * math.sin(t0) + dy * math.cos(t0)
+                world_dx = dx * math.cos(t0_rad) - dy * math.sin(t0_rad)
+                world_dy = dx * math.sin(t0_rad) + dy * math.cos(t0_rad)
                 
                 # 2. Calculate the new heading of the truck
                 new_t0 = self.normalize_angle(t0 + lut_t0)
@@ -134,23 +134,24 @@ class Truck(Vehicle):
         if t1 is None:
             t1 = t0
         truck_base = box(-self.height/2, -self.width/2, self.height/2, self.width/2)
-        truck_poly = translate(rotate(truck_base, t0, use_radians=True), x, y)
+        truck_poly = translate(rotate(truck_base, t0, use_radians=False), x, y)
 
         # 2. Trailer Footprint
         # The trailer axle center is d1 meters behind the hitch (x, y)
-        trailer_axle_x = x - self.d1 * math.cos(t1)
-        trailer_axle_y = y - self.d1 * math.sin(t1)
+        t1_rad = math.radians(t1)
+        trailer_axle_x = x - self.d1 * math.cos(t1_rad)
+        trailer_axle_y = y - self.d1 * math.sin(t1_rad)
         
         # Center the trailer box on its axle
         trailer_base = box(-self.trailerHeight/2, -self.trailerWidth/2, 
                            self.trailerHeight/2, self.trailerWidth/2)
-        trailer_poly = translate(rotate(trailer_base, t1, use_radians=True), 
+        trailer_poly = translate(rotate(trailer_base, t1, use_radians=False), 
                                  trailer_axle_x, trailer_axle_y)
 
         # 3. Combine them
         return unary_union([truck_poly, trailer_poly])
 
-    def snap_to_grid(self, state, res, angle_res=math.radians(15)):
+    def snap_to_grid(self, state, res, angle_res=15):
         """Overridden to handle 4D state (x, y, t0, t1)"""
         x, y, t0, t1 = state
         snapped_x = round(x / res) * res
@@ -162,17 +163,10 @@ class Truck(Vehicle):
                 round(snapped_t0, 3), round(snapped_t1, 3))
     
     def normalize_angle(self, angle):
-        """
-        Wraps the angle to stay within [-pi, pi] for radians 
-        or [-180, 180] for degrees.
-        """
-        # If using Radians (recommended for the LUT math):
-        return (angle + math.pi) % (2 * math.pi) - math.pi
+        """Wraps angle to [-180, 180]."""
+        return (angle + 180) % 360 - 180
 
-        # IF you prefer Degrees (make sure to be consistent!):
-        # return (angle + 180) % 360 - 180
-
-    def is_near_goal(self, state, goal, pos_threshold=1.5, angle_threshold=math.radians(15)):
+    def is_near_goal(self, state, goal, pos_threshold=1.5, angle_threshold=15):
         curr_x, curr_y, t0, t1 = state
         gx, gy, gt0, gt1 = goal
         
@@ -198,9 +192,9 @@ class TruckTrailerLUT:
         
         # 1. Define our discrete "Bins"
         # Articulation: from -70 to 70 degrees (avoiding 90 deg jackknife)
-        self.articulation_bins = np.linspace(math.radians(-70), math.radians(70), 15)
+        self.articulation_bins = np.linspace(-70, 70, 15)
         # Steering: standard -30, -15, 0, 15, 30
-        self.steer_options = [math.radians(a) for a in [-30, -15, 0, 15, 30]]
+        self.steer_options =  [-30, -15, 0, 15, 30]
         
         # 2. The Table: {(articulation_bin, steer): (dx, dy, d_theta0, d_theta1)}
         self.table = {}
@@ -224,19 +218,30 @@ class TruckTrailerLUT:
                     new_state[2], new_state[3]
                 )
 
-    def _simulate_step(self, state, phi):
+    def _simulate_step(self, state, phi_deg):
         """The core kinematic simulation loop (run only once per bin)."""
-        x, y, t0, t1 = state
+        x, y, t0_deg, t1_deg = state
         sub_steps = 10
         ds = self.step_dist / sub_steps
         
         for _ in range(sub_steps):
-            x += ds * math.cos(t0)
-            y += ds * math.sin(t0)
-            t0 += (ds / self.L) * math.tan(phi)
-            t1 += (ds / self.d1) * math.sin(t0 - t1)
+            # Convert to radians for math.sin/cos/tan
+            t0_rad = math.radians(t0_deg)
+            t1_rad = math.radians(t1_deg)
+            phi_rad = math.radians(phi_deg)
+
+            # Update Position
+            x += ds * math.cos(t0_rad)
+            y += ds * math.sin(t0_rad)
+
+            # Update Headings (Convert the angular change from Rad to Deg)
+            dt0_deg = math.degrees((ds / self.L) * math.tan(phi_rad))
+            dt1_deg = math.degrees((ds / self.d1) * math.sin(t0_rad - t1_rad))
+
+            t0_deg += dt0_deg
+            t1_deg += dt1_deg
             
-        return (x, y, t0, t1)
+        return (x, y, t0_deg, t1_deg)
 
     def get_primitive(self, current_psi, phi):
         """Finds the closest pre-computed relative move."""
