@@ -104,18 +104,19 @@ class PlannerVisualizer:
         # 3. Draw Current Vehicle Position
         poly = self._create_vehicle_polygon(current_pos)
 
+        # Handle both Polygon (single car) and MultiPolygon (Truck + Trailer)
         if poly.geom_type == 'Polygon':
             geoms = [poly]
         else:
-            geoms = poly.geoms
+            # This extracts the individual Polygons from the MultiPolygon
+            geoms = list(poly.geoms)
 
         for p in geoms:
             ex_x, ex_y = p.exterior.xy
             self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
 
         self.show_goal_with_arrow(goal)
-        ex_x, ex_y = poly.exterior.xy
-        self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
+        
 
         # 4. Draw Goal
         self.ax.plot(goal[0], goal[1], "ro", markersize=10)
@@ -140,7 +141,7 @@ class PlannerVisualizer:
             for i, state in enumerate(path):
                 # Draw every 5th footprint to keep it readable
                 if i % 5 == 0 or i == len(path) - 1:
-                    poly = self._create_vehicle_polygon(*state)
+                    poly = self._create_vehicle_polygon(state)
                     geoms = [poly] if poly.geom_type == 'Polygon' else poly.geoms
                     alpha = 0.05 if i < len(path) - 1 else 0.8
                     for p in geoms:

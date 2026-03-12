@@ -3,6 +3,7 @@ from shapely import Polygon
 from shapely.affinity import rotate, translate
 from shapely.ops import unary_union
 from shapely.geometry import box
+from pathSimulator import PathSimulator
 import math
 import numpy as np
 import heapq
@@ -13,20 +14,20 @@ class Truck(Vehicle):
         startPose = (*startPose, startPose[2])
         goalPose = (*goalPose, goalPose[2])
         super().__init__(
-            width=5.4,
-            height=2.0,
+            width=2,
+            height=5.4,
             startState=startPose,
             goalState=goalPose,
             map=map,
             plot=plot,
         )
         
-        self.trailerWidth = 4.5
+        self.trailerWidth = 2
         self.L = 3.5
         self.d1 = 5.4
-        self.trailerHeight = 2.0
+        self.trailerHeight = 4.5
         self.lut = TruckTrailerLUT()
-        self.viz.vechile = self
+        self.viz.vehicle = self
         
     def plan(self, goal: tuple, step_size: int = 100, step_distance: float = 1.5):
         """
@@ -40,7 +41,7 @@ class Truck(Vehicle):
         heapq.heappush(open_list, (0 + self.calculate_heuristic(start_node, goal), start_node))
 
         # Track costs and parents
-        bin_res = step_distance*0.4
+        bin_res = step_distance*0.5
         cost_history = {self.snap_to_grid(start_node,bin_res ): 0}
         came_from = {}
         
@@ -50,9 +51,18 @@ class Truck(Vehicle):
             curr_snapped = self.snap_to_grid(current_state, bin_res)
 
             # 2. Goal Check
-            if self.is_near_goal(current_state, goal):
-                print(f"Path found! Nodes explored: {count}")
-                return self.reconstruct_path(came_from, curr_snapped)
+            if self.is_near_goal(curr_snapped, goal):
+                print("Goal Reached!")
+                self.exploredNodes = came_from
+                final_path = self.reconstruct_path(came_from, curr_snapped)
+                if self.viz:
+                    self.viz.show_final(
+                        final_path,
+                        cost_history,
+                        self.map.obstacle_coordinate_list,
+                        goal,
+                    )
+                return final_path
 
             # 3. Expansion
             # We pass current_state to get_neighbors which uses our LUT
@@ -75,7 +85,7 @@ class Truck(Vehicle):
 
                 if neighbor_snapped not in cost_history or tentative_g_score < cost_history[neighbor_snapped]:
                     cost_history[neighbor_snapped] = tentative_g_score
-                    came_from[neighbor_snapped] = current_state
+                    came_from[neighbor_snapped] = curr_snapped
                     
                     f_score = tentative_g_score + self.calculate_heuristic(neighbor, goal)
                     heapq.heappush(open_list, (f_score, neighbor))
@@ -177,7 +187,12 @@ class Truck(Vehicle):
         return dist < pos_threshold and t0_diff < angle_threshold
     
     def main_run(self):
-        self.plan(self.goal_state)
+        path = self.plan(self.goal_state)
+        if path:
+            print("Starting Simulation...")
+            print(f"Path found with {len(path)} nodes.") # Check this number!
+            sim = PathSimulator(self, path)
+            sim.run(velocity=6.0)  # Adjust speed here
 
     
 
