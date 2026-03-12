@@ -87,7 +87,7 @@ class Truck(Vehicle):
                     cost_history[neighbor_snapped] = tentative_g_score
                     came_from[neighbor_snapped] = curr_snapped
                     
-                    f_score = tentative_g_score + self.calculate_heuristic(neighbor, goal)
+                    f_score = tentative_g_score + self.calculate_heuristic(neighbor_snapped, goal)
                     heapq.heappush(open_list, (f_score, neighbor))
 
             count += 1
