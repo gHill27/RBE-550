@@ -1,0 +1,2 @@
+To see each vechile park in the intended location, please run its respective "Vechilename"_main.py
+In the event that a path is not possible, the terminal will display path not possible and stop the program. If this happens please retry as the random obstacles may lead to these unsolvable situations.
