@@ -8,7 +8,6 @@ class Delivery(Vehicle):
     """
     A specific implementation of a Delivery robot using A* State Lattice.
     """
-
     def __init__(self, startPose: State, goalPose: State, map: Map = None, plot=False):
         super().__init__(
             height=0.7,
@@ -18,7 +17,6 @@ class Delivery(Vehicle):
             map=map,
             plot=plot,
         )
-        # if a map doesn't exist create one
 
     def get_neighbors(
         self, current_state: State, motion_primatives: dict[float, tuple[float, float]]
@@ -66,5 +64,4 @@ class Delivery(Vehicle):
         if path:
             print("Starting Simulation...")
             sim = PathSimulator(self, path)
-            sim.run(velocity=6.0)  # Adjust speed here
-        # path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=0.3)
+            sim.run(velocity=6.0)

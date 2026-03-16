@@ -41,7 +41,6 @@ class Police(Vehicle):
         """
         Generates possible neighboring states
         """
-        # prepreforming expensive cos/sin calculation
         cos = math.cos(math.radians(current_state[2]))
         sin = math.sin(math.radians(current_state[2]))
 

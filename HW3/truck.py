@@ -111,9 +111,9 @@ class Truck(Vehicle):
         path = self.plan(self.goal_state, step_distance=step_distance)
         if path:
             print("Starting Simulation...")
-            print(f"Path found with {len(path)} nodes.") # Check this number!
+            print(f"Path found with {len(path)} nodes.") 
             sim = PathSimulator(self, path)
-            sim.run(velocity=6.0)  # Adjust speed here
+            sim.run(velocity=6.0)  
 
 class TruckTrailerLUT:
     def __init__(self, step_dist=1.5, L=3.5, d1=5.0):

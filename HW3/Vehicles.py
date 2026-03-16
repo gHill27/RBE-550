@@ -26,7 +26,6 @@ from typing import TypeAlias, Optional, Tuple, List
 from abc import ABC, abstractmethod
 
 from pathVisualizer import PlannerVisualizer
-import time
 
 State: TypeAlias = tuple[float, float, float]  # (x, y, theta)
 Point2D: TypeAlias = tuple[float, float]
@@ -85,8 +84,6 @@ class Vehicle(ABC):
         mp = self.calculate_motion_primitives(step_distance)
         count = 0
         start_node = self.start_pos
-        # self.map.goal_pos = (1.3,2.2) #TODO fix this so it doesn't brick the code everytime
-
         # open_list stores: (f_score, current_coord)
         open_list = []
         heapq.heappush(
@@ -268,19 +265,6 @@ class Vehicle(ABC):
         self, step_distance: float, step_precision: int = 16
     ) -> dict[float, tuple[float, float]]:
         pass
-
-    def is_collision(self, state: State):
-        """
-        Checks if the vehicle's footprint overlaps with any map obstacles.
-        """
-        if self.full_obstacle_geometry is None:
-            return False
-
-        # Generate footprint based on the current state
-        footprint = self.get_footprint(*state)
-
-        # Check if the robot geometry touches the obstacle geometry
-        return footprint.intersects(self.full_obstacle_geometry)
 
     def is_state_valid(self, state: State) -> bool:
         """The 'Master' check for boundary and collisions."""
