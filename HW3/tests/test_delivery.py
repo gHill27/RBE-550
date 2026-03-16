@@ -344,7 +344,7 @@ def test_trailer_alignment_on_straight():
     current_state = (0, 0, 0, -30) 
     
     # Move straight
-    new_state = lut.get_primitive(current_state, 0)
+    new_state = lut.get_primitive(current_state, 0,1)
     
     # The new trailer angle should be CLOSER to the truck angle (0)
     # than it was before. (-30 -> closer to 0)

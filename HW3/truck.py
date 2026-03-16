@@ -47,15 +47,16 @@ class Truck(Vehicle):
 
     def get_neighbors(self, current_state, motion_primatives):
         neighbors = []
-        # phi is the steering choice from [-30, -15, 0, 15, 30]
-        for phi in motion_primatives.steer_options:
-            # Pass the loop variable 'phi' as the steering angle!
-            res = motion_primatives.get_primitive(current_state=current_state, phi=phi)
-            
-            if res:
-                # res is already (new_x, new_y, new_t0, new_t1) in world coordinates
-                neighbors.append(res)
-                
+        # Check both Forward and Reverse for every steering option
+        for direction in [1, -1]:
+            for phi in motion_primatives.steer_options:
+                res = motion_primatives.get_primitive(
+                    current_state=current_state, 
+                    phi=phi, 
+                    direction=direction
+                )
+                if res:
+                    neighbors.append(res)
         return neighbors
 
     def get_footprint(self, x, y, t0, t1) -> Polygon:
@@ -131,52 +132,49 @@ class TruckTrailerLUT:
         self._generate_table()
 
     def _generate_table(self):
-        """Populates the table with pre-computed relative motions."""
         for psi_start in self.articulation_bins:
             for phi in self.steer_options:
-                # We start at (0,0,0) with the trailer at psi_start
-                # theta1 = theta0 - psi => 0 - psi_start
-                state = (0.0, 0.0, 0.0, -psi_start)
-                
-                # Run the simulation (Euler integration)
-                new_state = self._simulate_step(state, phi)
-                
-                # Store the delta (change)
-                # (dx, dy, d_theta0, d_theta1)
-                self.table[(psi_start, phi)] = (
-                    new_state[0], new_state[1], 
-                    new_state[2], new_state[3]
-                )
+                for direction in [1, -1]: # Generate both Forward and Reverse
+                    state = (0.0, 0.0, 0.0, -psi_start)
+                    new_state = self._simulate_step(state, phi, direction)
+                    
+                    # Key is now (psi, phi, direction)
+                    self.table[(psi_start, phi, direction)] = (
+                        new_state[0], new_state[1], 
+                        new_state[2], new_state[3]
+                    )
 
-    def _simulate_step(self, state, phi_deg):
+    def _simulate_step(self, state, phi_deg, direction=1):
+        """
+        direction=1 for Forward, direction=-1 for Reverse.
+        """
         x, y, t0_deg, t1_deg = state
-        sub_steps = 10
-        ds = self.step_dist / sub_steps
+        sub_steps = 15 # Increased sub-steps for reverse stability
+        # direction * step_dist
+        ds = (self.step_dist * direction) / sub_steps
         
         phi_rad = math.radians(phi_deg)
 
         for _ in range(sub_steps):
-            # 1. Calculate the rate of change for headings (in radians)
             # Tractor change: bicycle model
             dt0_rad = (ds / self.L) * math.tan(phi_rad)
-            # Trailer change: standard kinematic follow-rule
+            
             t0_rad = math.radians(t0_deg)
             t1_rad = math.radians(t1_deg)
+            # Trailer change: kinematic follow-rule
             dt1_rad = (ds / self.d1) * math.sin(t0_rad - t1_rad)
 
-            # 2. Update Position using the MIDPOINT heading
-            # This ensures the displacement vector is aligned with the arc, not the tangent
+            # Update Position
             mid_t0_rad = t0_rad + (dt0_rad / 2.0)
             x += ds * math.cos(mid_t0_rad)
             y += ds * math.sin(mid_t0_rad)
 
-            # 3. Update the state headings for the next sub-step
             t0_deg += math.degrees(dt0_rad)
             t1_deg += math.degrees(dt1_rad)
             
         return (x, y, t0_deg, t1_deg)
 
-    def get_primitive(self, current_state, phi):
+    def get_primitive(self, current_state, phi,direction):
         x, y, t0, t1 = current_state
         current_psi = self.normalize_angle(t0 - t1)
         
@@ -185,7 +183,7 @@ class TruckTrailerLUT:
         
         # These are absolute values from a simulation starting at (0,0,0)
         # with trailer at -closest_psi
-        res = self.table.get((closest_psi, phi))
+        res = self.table.get((closest_psi, phi,direction))
         if not res: return None
         
         lx, ly, lt0, lt1 = res # 'l' for local/lut
@@ -205,6 +203,8 @@ class TruckTrailerLUT:
         
         # The articulation (psi) at the end of the LUT step is (lt0 - lt1)
         final_psi = lt0 - lt1
+        if abs(final_psi) > 75: # Safety limit slightly above your 70 bin
+            return None
         new_t1 = self.normalize_angle(new_t0 - final_psi)
         
         return (new_x, new_y, new_t0, new_t1)
