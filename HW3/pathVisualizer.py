@@ -102,22 +102,22 @@ class PlannerVisualizer:
             self.ax.scatter(xs, ys, c="orange", s=1, alpha=0.5)
 
         # 3. Draw Current Vehicle Position
-        poly = self._create_vehicle_polygon(current_pos)
+        polys = self._create_vehicle_polygon(current_pos)
+        if not isinstance(polys,List):
+            polys = [polys]
+        for poly in polys:
+            # Handle both Polygon (single car) and MultiPolygon (Truck + Trailer)
+            if poly.geom_type == 'Polygon':
+                geoms = [poly]
+            else:
+                # This extracts the individual Polygons from the MultiPolygon
+                geoms = list(poly.geoms)
 
-        # Handle both Polygon (single car) and MultiPolygon (Truck + Trailer)
-        if poly.geom_type == 'Polygon':
-            geoms = [poly]
-        else:
-            # This extracts the individual Polygons from the MultiPolygon
-            geoms = list(poly.geoms)
-
-        for p in geoms:
-            ex_x, ex_y = p.exterior.xy
-            self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
+            for p in geoms:
+                ex_x, ex_y = p.exterior.xy
+                self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
 
         self.show_goal_with_arrow(goal)
-        
-
         # 4. Draw Goal
         self.ax.plot(goal[0], goal[1], "ro", markersize=10)
 
@@ -141,12 +141,15 @@ class PlannerVisualizer:
             for i, state in enumerate(path):
                 # Draw every 5th footprint to keep it readable
                 if i % 5 == 0 or i == len(path) - 1:
-                    poly = self._create_vehicle_polygon(state)
-                    geoms = [poly] if poly.geom_type == 'Polygon' else poly.geoms
-                    alpha = 0.05 if i < len(path) - 1 else 0.8
-                    for p in geoms:
-                        ex_x, ex_y = p.exterior.xy
-                        self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
+                    polys = self._create_vehicle_polygon(state)
+                    if not isinstance(polys,List):
+                        polys = [polys]
+                    for poly in polys:
+                        geoms = [poly] if poly.geom_type == 'Polygon' else poly.geoms
+                        alpha = 0.05 if i < len(path) - 1 else 0.8
+                        for p in geoms:
+                            ex_x, ex_y = p.exterior.xy
+                            self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
 
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open

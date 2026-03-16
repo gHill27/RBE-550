@@ -261,7 +261,7 @@ class Vehicle(ABC):
             A Shapely Polygon representing the transformed footprint.
         """
         rotated = rotate(self.base_footprint, theta, origin=(0, 0))
-        return translate(rotated, xoff=x, yoff=y)
+        return [translate(rotated, xoff=x, yoff=y)]
 
     @abstractmethod
     def calculate_motion_primitives(
@@ -285,20 +285,20 @@ class Vehicle(ABC):
     def is_state_valid(self, state: State) -> bool:
         """The 'Master' check for boundary and collisions."""
         # 1. Generate footprint
-        footprint = self.get_footprint(*state)
+        footprints = self.get_footprint(*state)
+        for footprint in footprints:
+            # 2. Boundary Check (Entire shell must be inside 0-35.99m)
+            world_box = box(0.01, 0.01, 35.99, 35.99)
+            if not footprint.within(world_box):
+                return False
 
-        # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-        world_box = box(0.01, 0.01, 35.99, 35.99)
-        if not footprint.within(world_box):
-            return False
+            # 3. Obstacle Check
+            if self.full_obstacle_geometry and footprint.intersects(
+                self.full_obstacle_geometry
+            ):
+                return False
 
-        # 3. Obstacle Check
-        if self.full_obstacle_geometry and footprint.intersects(
-            self.full_obstacle_geometry
-        ):
-            return False
-
-        return True
+            return True
 
     def prepare_obstacles(self, obstacle_List: List[Tuple[int, int]], cell_size=3):
         """

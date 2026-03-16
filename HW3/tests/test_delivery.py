@@ -15,6 +15,7 @@ sys.path.insert(0, parent_dir)
 
 from Vehicles import Map
 from police import Police
+from truck import Truck, TruckTrailerLUT
 from delivery import Delivery  
 
 # --- FIXTURES ---
@@ -312,7 +313,29 @@ def test_police_narrow_passage(goal_State):
     
 #     # If it found a path, it likely 'jumped' over the wall at x=9-12
 #     assert path is None, "Robot leaked through a thin wall!"
-
+def test_kinematic_consistency():
+    """
+    Ensures the displacement (dx, dy) aligns with the vehicle's heading.
+    If this fails, the truck will move 'sideways'.
+    """
+    # Mocking a step from your LUT: start at (0,0,0,0), steer at 20 degrees
+    # Replace 'lut_instance' with your actual LUT generator
+    lut = TruckTrailerLUT()
+    start_state = (0, 0, 0, 0) 
+    steering_angle = 20 
+    end_state = lut._simulate_step(start_state, steering_angle)
+    
+    dx = end_state[0] - start_state[0]
+    dy = end_state[1] - start_state[1]
+    actual_move_angle = math.degrees(math.atan2(dy, dx))
+    
+    # The vehicle's heading starts at 0 and ends at end_state[2]
+    # The movement vector should be roughly the average of these
+    avg_heading = (0 + end_state[2]) / 2.0
+    
+    # Tolerance of 1-2 degrees is acceptable for discrete integration
+    assert abs(actual_move_angle - avg_heading) < 2.0, \
+        f"Crabbing detected! Move Angle: {actual_move_angle}, Avg Heading: {avg_heading}"
 
 def test_path_cost_revisions(empty_map,goal_State):
     """Verifies that A* updates a node if a cheaper path is found."""

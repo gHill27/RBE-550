@@ -35,18 +35,24 @@ class PathSimulator:
             
             for n in range(num_steps):
                 ratio = n / num_steps
+                # 1. Interpolate the Truck's hitch position (ix, iy)
                 ix = p1[0] + (p2[0] - p1[0]) * ratio
                 iy = p1[1] + (p2[1] - p1[1]) * ratio
 
-                # Interpolate Truck Heading
+                # 2. Interpolate Headings
                 diff0 = (p2[2] - p1[2] + 180) % 360 - 180
                 it0 = (p1[2] + diff0 * ratio) % 360
                 
-                # Interpolate Trailer Heading
                 diff1 = (t1_end - t1_start + 180) % 360 - 180
                 it1 = (t1_start + diff1 * ratio) % 360
                 
-                smooth_path.append((ix, iy, it0,it1))
+                # 3. GEOMETRY FIX: The trailer's (x, y) is NOT (ix, iy). 
+                # It is derived from the truck's hitch + trailer angle.
+                # However, for drawing, your get_footprint(x, y, t0, t1) 
+                # likely expects (ix, iy) to be the pivot. 
+                # Ensure your footprint function uses (ix, iy) as the HITCH.
+                
+                smooth_path.append((ix, iy, it0, it1))
         
         final = self.original_path[-1]
         smooth_path.append((final[0], final[1], final[2], final[3] if len(final)>3 else final[2]))
@@ -85,7 +91,7 @@ class PathSimulator:
             initial_footprint = self.vehicle.get_footprint(*start_state)
         else:
             initial_footprint = self.vehicle.get_footprint(*start_state[:3])
-        parts = initial_footprint.geoms if hasattr(initial_footprint, 'geoms') else [initial_footprint]
+        parts = initial_footprint
         
         self.patches = []
         colors = ['cyan', 'yellow'] # Cyan for Truck, Yellow for Trailer
@@ -103,7 +109,7 @@ class PathSimulator:
             footprint = self.vehicle.get_footprint(*state[:arg_count])
             
             # Update each polygon part (truck and trailer)
-            current_geoms = footprint.geoms if hasattr(footprint, 'geoms') else [footprint]
+            current_geoms = footprint
             
             for patch, geom in zip(self.patches, current_geoms):
                 patch.set_xy(list(geom.exterior.coords))

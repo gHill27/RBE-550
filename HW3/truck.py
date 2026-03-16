@@ -24,102 +24,35 @@ class Truck(Vehicle):
         
         self.trailerWidth = 2
         self.L = 3.5
-        self.d1 = 5.4
+        self.d1 = 5
         self.trailerHeight = 4.5
         self.lut = TruckTrailerLUT()
-        self.viz.vehicle = self
-        
-    def plan(self, goal: tuple, step_size: int = 100, step_distance: float = 1.5):
-        """
-        4D A* Search for Truck and Trailer.
-        Goal is (x, y, theta0, theta1)
-        """
-        start_node = self.start_pos # (x, y, t0, t1)
-        
-        # open_list: (f_score, state)
-        open_list = []
-        heapq.heappush(open_list, (0 + self.calculate_heuristic(start_node, goal), start_node))
-
-        # Track costs and parents
-        bin_res = step_distance*0.5
-        cost_history = {self.snap_to_grid(start_node,bin_res ): 0}
-        came_from = {}
-        
-        count = 0
-        while open_list:
-            _, current_state = heapq.heappop(open_list)
-            curr_snapped = self.snap_to_grid(current_state, bin_res)
-
-            # 2. Goal Check
-            if self.is_near_goal(curr_snapped, goal):
-                print("Goal Reached!")
-                self.exploredNodes = came_from
-                final_path = self.reconstruct_path(came_from, curr_snapped)
-                if self.viz:
-                    self.viz.show_final(
-                        final_path,
-                        cost_history,
-                        self.map.obstacle_coordinate_list,
-                        goal,
-                    )
-                return final_path
-
-            # 3. Expansion
-            # We pass current_state to get_neighbors which uses our LUT
-            for neighbor in self.get_neighbors(current_state):
-                
-                # Collision & Boundary Check
-                if not self.is_state_valid(neighbor):
-                    continue
-
-                # 4. Custom Cost Calculation
-                # Base cost is distance
-                move_cost = step_distance
-
-                # Penalty for sharp articulation (prevents unnecessary wiggliness)
-                articulation_penalty = abs(neighbor[2] - neighbor[3]) * 0.1
-                
-                tentative_g_score = cost_history[curr_snapped] + move_cost + articulation_penalty
-                
-                neighbor_snapped = self.snap_to_grid(neighbor, bin_res)
-
-                if neighbor_snapped not in cost_history or tentative_g_score < cost_history[neighbor_snapped]:
-                    cost_history[neighbor_snapped] = tentative_g_score
-                    came_from[neighbor_snapped] = curr_snapped
-                    
-                    f_score = tentative_g_score + self.calculate_heuristic(neighbor_snapped, goal)
-                    heapq.heappush(open_list, (f_score, neighbor))
-
-            count += 1
-            if count % step_size == 0 and self.viz:
-                self.viz.update(current_state, cost_history, self.map.obstacle_coordinate_list, goal)
-
-        print("No path found.")
-        return None
-    
+        self.viz.vehicle = self    
 
     def calculate_heuristic(self, state, goal):
+        WEIGHT = 1.5
         """4D Heuristic: Distance + Truck Heading + Trailer Heading."""
         dist = math.sqrt((state[0]-goal[0])**2 + (state[1]-goal[1])**2)
+        if dist < 2:
+            # Truck heading alignment
+            t0_diff = abs(self.normalize_angle(state[2] - goal[2]))
+            
+            # Trailer alignment (we want the trailer straight relative to truck)
+            t1_diff = abs(self.normalize_angle(state[2] - state[3]))
         
-        # Truck heading alignment
-        t0_diff = abs(self.normalize_angle(state[2] - goal[2]))
-        
-        # Trailer alignment (we want the trailer straight relative to truck)
-        t1_diff = abs(self.normalize_angle(state[2] - state[3]))
-        
-        return dist + (t0_diff * 0.15) + (t1_diff * 0.1)
+            return dist*WEIGHT + (t0_diff * 0.15) + (t1_diff * 0)
+        return dist * WEIGHT
     
     def calculate_motion_primitives(self, step_distance):
-        pass
+        return self.lut
 
-    def get_neighbors(self, current_state):
+    def get_neighbors(self, current_state, motion_primatives):
         x, y, t0, t1 = current_state
         psi = t0 - t1 
         neighbors = []
         t0_rad,t1_rad,psi_rad = math.radians(t0),math.radians(t1), math.radians(psi)
         for phi in self.lut.steer_options:
-            res = self.lut.get_primitive(psi, phi)
+            res = self.lut.get_primitive(current_state=current_state, phi = phi)
             if res:
                 dx, dy, lut_t0, lut_t1 = res # lut_t0 and lut_t1 are local headings
                 
@@ -139,27 +72,24 @@ class Truck(Vehicle):
         return neighbors
 
     def get_footprint(self, x, y, t0, t1) -> Polygon:
-        """Calculates both the Truck and Trailer polygons combined."""
-        # 1. Truck Footprint (centered at x, y)
-        if t1 is None:
-            t1 = t0
-        truck_base = box(-self.height/2, -self.width/2, self.height/2, self.width/2)
-        truck_poly = translate(rotate(truck_base, t0, use_radians=False), x, y)
+        """
+        (x, y) is the HITCH point.
+        t0 is Truck heading, t1 is Trailer heading (both in degrees).
+        """
+        # 1. TRUCK: Hitch is at the rear. 
+        # Box goes from 0 to +Length along the X-axis.
+        truck_base = box(0, -self.width/2, self.height, self.width/2)
+        # Rotate around the HITCH (0,0), then move to world (x,y)
+        truck_poly = translate(rotate(truck_base, t0, origin=(0, 0), use_radians=False), x, y)
 
-        # 2. Trailer Footprint
-        # The trailer axle center is d1 meters behind the hitch (x, y)
-        t1_rad = math.radians(t1)
-        trailer_axle_x = x - self.d1 * math.cos(t1_rad)
-        trailer_axle_y = y - self.d1 * math.sin(t1_rad)
-        
-        # Center the trailer box on its axle
-        trailer_base = box(-self.trailerHeight/2, -self.trailerWidth/2, 
-                           self.trailerHeight/2, self.trailerWidth/2)
-        trailer_poly = translate(rotate(trailer_base, t1, use_radians=False), 
-                                 trailer_axle_x, trailer_axle_y)
+        # 2. TRAILER: Hitch is at the front.
+        # Box goes from -d1 to 0 along the X-axis.
+        trailer_base = box(-self.d1, -self.trailerWidth/2, -1, self.trailerWidth/2)
+        # Rotate around the HITCH (0,0), then move to world (x,y)
+        trailer_poly = translate(rotate(trailer_base, t1, origin=(0, 0), use_radians=False), x, y)
 
-        # 3. Combine them
-        return unary_union([truck_poly, trailer_poly])
+        # Return as a list to maintain color indexing [Truck, Trailer]
+        return [truck_poly, trailer_poly]
 
     def snap_to_grid(self, state, res, angle_res=15):
         """Overridden to handle 4D state (x, y, t0, t1)"""
@@ -187,7 +117,7 @@ class Truck(Vehicle):
         return dist < pos_threshold and t0_diff < angle_threshold
     
     def main_run(self):
-        path = self.plan(self.goal_state)
+        path = self.plan(self.goal_state, step_distance=1.5)
         if path:
             print("Starting Simulation...")
             print(f"Path found with {len(path)} nodes.") # Check this number!
@@ -200,7 +130,7 @@ class Truck(Vehicle):
 
 
 class TruckTrailerLUT:
-    def __init__(self, step_dist=1.5, L=3.5, d1=5.4):
+    def __init__(self, step_dist=1.5, L=3.5, d1=5.0):
         self.step_dist = step_dist
         self.L = L
         self.d1 = d1
@@ -234,32 +164,51 @@ class TruckTrailerLUT:
                 )
 
     def _simulate_step(self, state, phi_deg):
-        """The core kinematic simulation loop (run only once per bin)."""
         x, y, t0_deg, t1_deg = state
         sub_steps = 10
         ds = self.step_dist / sub_steps
         
+        phi_rad = math.radians(phi_deg)
+
         for _ in range(sub_steps):
-            # Convert to radians for math.sin/cos/tan
+            # 1. Calculate the rate of change for headings (in radians)
+            # Tractor change: bicycle model
+            dt0_rad = (ds / self.L) * math.tan(phi_rad)
+            # Trailer change: standard kinematic follow-rule
             t0_rad = math.radians(t0_deg)
             t1_rad = math.radians(t1_deg)
-            phi_rad = math.radians(phi_deg)
+            dt1_rad = (ds / self.d1) * math.sin(t0_rad - t1_rad)
 
-            # Update Position
-            x += ds * math.cos(t0_rad)
-            y += ds * math.sin(t0_rad)
+            # 2. Update Position using the MIDPOINT heading
+            # This ensures the displacement vector is aligned with the arc, not the tangent
+            mid_t0_rad = t0_rad + (dt0_rad / 2.0)
+            x += ds * math.cos(mid_t0_rad)
+            y += ds * math.sin(mid_t0_rad)
 
-            # Update Headings (Convert the angular change from Rad to Deg)
-            dt0_deg = math.degrees((ds / self.L) * math.tan(phi_rad))
-            dt1_deg = math.degrees((ds / self.d1) * math.sin(t0_rad - t1_rad))
-
-            t0_deg += dt0_deg
-            t1_deg += dt1_deg
+            # 3. Update the state headings for the next sub-step
+            t0_deg += math.degrees(dt0_rad)
+            t1_deg += math.degrees(dt1_rad)
             
         return (x, y, t0_deg, t1_deg)
 
-    def get_primitive(self, current_psi, phi):
-        """Finds the closest pre-computed relative move."""
-        # Find the nearest articulation bin
+    def get_primitive(self, current_state, phi):
+        x, y, t0, t1 = current_state
+        current_psi = t0 - t1 # Articulation angle
+        
+        # 1. Find the nearest pre-computed bin
         closest_psi = min(self.articulation_bins, key=lambda x: abs(x - current_psi))
-        return self.table.get((closest_psi, phi))
+        dx_rel, dy_rel, dt0, dt1 = self.table.get((closest_psi, phi))
+        
+        # 2. ROTATE the relative displacement into the world frame
+        # This is the step that stops the sideways sliding!
+        t0_rad = math.radians(t0)
+        dx_world = dx_rel * math.cos(t0_rad) - dy_rel * math.sin(t0_rad)
+        dy_world = dx_rel * math.sin(t0_rad) + dy_rel * math.cos(t0_rad)
+        
+        # 3. Apply the rotated displacement
+        new_x = x + dx_world
+        new_y = y + dy_world
+        new_t0 = (t0 + dt0) % 360
+        new_t1 = (t1 + dt1) % 360
+        
+        return (new_x, new_y, new_t0, new_t1)
