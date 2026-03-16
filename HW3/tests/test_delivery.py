@@ -336,7 +336,24 @@ def test_kinematic_consistency():
     # Tolerance of 1-2 degrees is acceptable for discrete integration
     assert abs(actual_move_angle - avg_heading) < 2.0, \
         f"Crabbing detected! Move Angle: {actual_move_angle}, Avg Heading: {avg_heading}"
-
+    
+def test_trailer_alignment_on_straight():
+    lut = TruckTrailerLUT(step_dist=2.0, d1=5.0)
+    # Truck at 0, Trailer "kinked" at 30 degrees
+    # psi = t0 - t1 = -30
+    current_state = (0, 0, 0, -30) 
+    
+    # Move straight
+    new_state = lut.get_primitive(current_state, 0)
+    
+    # The new trailer angle should be CLOSER to the truck angle (0)
+    # than it was before. (-30 -> closer to 0)
+    old_error = abs(current_state[2] - current_state[3])
+    new_error = abs(new_state[2] - new_state[3])
+    
+    assert new_error < old_error, \
+        f"Trailer failed to align! Error was {old_error}, now {new_error}"
+    
 def test_path_cost_revisions(empty_map,goal_State):
     """Verifies that A* updates a node if a cheaper path is found."""
     start = (10, 10, 0)

@@ -26,7 +26,6 @@ class Truck(Vehicle):
         self.L = 3.5
         self.d1 = 5
         self.trailerHeight = 4.5
-        self.lut = TruckTrailerLUT()
         self.viz.vehicle = self    
 
     def calculate_heuristic(self, state, goal):
@@ -40,35 +39,23 @@ class Truck(Vehicle):
             # Trailer alignment (we want the trailer straight relative to truck)
             t1_diff = abs(self.normalize_angle(state[2] - state[3]))
         
-            return dist*WEIGHT + (t0_diff * 0.15) + (t1_diff * 0)
+            return dist*WEIGHT + (t0_diff * 0.15) + (t1_diff * 0.1)
         return dist * WEIGHT
     
     def calculate_motion_primitives(self, step_distance):
         return self.lut
 
     def get_neighbors(self, current_state, motion_primatives):
-        x, y, t0, t1 = current_state
-        psi = t0 - t1 
         neighbors = []
-        t0_rad,t1_rad,psi_rad = math.radians(t0),math.radians(t1), math.radians(psi)
-        for phi in self.lut.steer_options:
-            res = self.lut.get_primitive(current_state=current_state, phi = phi)
+        # phi is the steering choice from [-30, -15, 0, 15, 30]
+        for phi in motion_primatives.steer_options:
+            # Pass the loop variable 'phi' as the steering angle!
+            res = motion_primatives.get_primitive(current_state=current_state, phi=phi)
+            
             if res:
-                dx, dy, lut_t0, lut_t1 = res # lut_t0 and lut_t1 are local headings
+                # res is already (new_x, new_y, new_t0, new_t1) in world coordinates
+                neighbors.append(res)
                 
-                # 1. Rotate the displacement into the world frame
-                world_dx = dx * math.cos(t0_rad) - dy * math.sin(t0_rad)
-                world_dy = dx * math.sin(t0_rad) + dy * math.cos(t0_rad)
-                
-                # 2. Calculate the new heading of the truck
-                new_t0 = self.normalize_angle(t0 + lut_t0)
-                
-                # 3. Derive the new trailer heading from the LUT's final articulation
-                # Articulation (psi) = Truck_Heading - Trailer_Heading
-                final_psi = lut_t0 - lut_t1
-                new_t1 = self.normalize_angle(new_t0 - final_psi)
-
-                neighbors.append((x + world_dx, y + world_dy, new_t0, new_t1))
         return neighbors
 
     def get_footprint(self, x, y, t0, t1) -> Polygon:
@@ -84,14 +71,14 @@ class Truck(Vehicle):
 
         # 2. TRAILER: Hitch is at the front.
         # Box goes from -d1 to 0 along the X-axis.
-        trailer_base = box(-self.d1, -self.trailerWidth/2, -1, self.trailerWidth/2)
+        trailer_base = box(-self.d1, -self.trailerWidth/2, 0, self.trailerWidth/2)
         # Rotate around the HITCH (0,0), then move to world (x,y)
         trailer_poly = translate(rotate(trailer_base, t1, origin=(0, 0), use_radians=False), x, y)
 
         # Return as a list to maintain color indexing [Truck, Trailer]
         return [truck_poly, trailer_poly]
 
-    def snap_to_grid(self, state, res, angle_res=15):
+    def snap_to_grid(self, state, res, angle_res=3):
         """Overridden to handle 4D state (x, y, t0, t1)"""
         x, y, t0, t1 = state
         snapped_x = round(x / res) * res
@@ -112,22 +99,20 @@ class Truck(Vehicle):
         
         dist = math.sqrt((curr_x - gx)**2 + (curr_y - gy)**2)
         t0_diff = abs(self.normalize_angle(t0 - gt0))
+        # Check that the trailer is straight relative to the truck (psi approx 0)
+        psi = abs(self.normalize_angle(t0 - t1))
         
-        # Optional: Only reach goal if truck AND trailer are aligned
-        return dist < pos_threshold and t0_diff < angle_threshold
+        return dist < pos_threshold and t0_diff < angle_threshold and psi < 10
     
     def main_run(self):
-        path = self.plan(self.goal_state, step_distance=1.5)
+        step_distance  = 1.5
+        self.lut = TruckTrailerLUT(step_dist= step_distance, L=self.L, d1 = self.d1)
+        path = self.plan(self.goal_state, step_distance=step_distance)
         if path:
             print("Starting Simulation...")
             print(f"Path found with {len(path)} nodes.") # Check this number!
             sim = PathSimulator(self, path)
             sim.run(velocity=6.0)  # Adjust speed here
-
-    
-
-
-
 
 class TruckTrailerLUT:
     def __init__(self, step_dist=1.5, L=3.5, d1=5.0):
@@ -137,7 +122,7 @@ class TruckTrailerLUT:
         
         # 1. Define our discrete "Bins"
         # Articulation: from -70 to 70 degrees (avoiding 90 deg jackknife)
-        self.articulation_bins = np.linspace(-70, 70, 15)
+        self.articulation_bins = np.linspace(-70, 70, 71)
         # Steering: standard -30, -15, 0, 15, 30
         self.steer_options =  [-30, -15, 0, 15, 30]
         
@@ -193,22 +178,36 @@ class TruckTrailerLUT:
 
     def get_primitive(self, current_state, phi):
         x, y, t0, t1 = current_state
-        current_psi = t0 - t1 # Articulation angle
+        current_psi = self.normalize_angle(t0 - t1)
         
-        # 1. Find the nearest pre-computed bin
-        closest_psi = min(self.articulation_bins, key=lambda x: abs(x - current_psi))
-        dx_rel, dy_rel, dt0, dt1 = self.table.get((closest_psi, phi))
+        # 1. Find nearest bin
+        closest_psi = min(self.articulation_bins, key=lambda b: abs(b - current_psi))
         
-        # 2. ROTATE the relative displacement into the world frame
-        # This is the step that stops the sideways sliding!
+        # These are absolute values from a simulation starting at (0,0,0)
+        # with trailer at -closest_psi
+        res = self.table.get((closest_psi, phi))
+        if not res: return None
+        
+        lx, ly, lt0, lt1 = res # 'l' for local/lut
+        
+        # 2. Rotate the relative displacement into world frame
         t0_rad = math.radians(t0)
-        dx_world = dx_rel * math.cos(t0_rad) - dy_rel * math.sin(t0_rad)
-        dy_world = dx_rel * math.sin(t0_rad) + dy_rel * math.cos(t0_rad)
+        dx_world = lx * math.cos(t0_rad) - ly * math.sin(t0_rad)
+        dy_world = lx * math.sin(t0_rad) + ly * math.cos(t0_rad)
         
-        # 3. Apply the rotated displacement
+        # 3. Calculate absolute new state
         new_x = x + dx_world
         new_y = y + dy_world
-        new_t0 = (t0 + dt0) % 360
-        new_t1 = (t1 + dt1) % 360
+        
+        # Headings: lt0 is the change in truck heading
+        # lt1 is the new absolute trailer heading if truck started at 0
+        new_t0 = self.normalize_angle(t0 + lt0)
+        
+        # The articulation (psi) at the end of the LUT step is (lt0 - lt1)
+        final_psi = lt0 - lt1
+        new_t1 = self.normalize_angle(new_t0 - final_psi)
         
         return (new_x, new_y, new_t0, new_t1)
+
+    def normalize_angle(self, angle):
+        return (angle + 180) % 360 - 180

@@ -29,7 +29,7 @@ class Map:
     def update_goal(self,goal:tuple[float,float,float]):
         self.goal_pos = goal
 
-    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=3.0):
+    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=6.0):
         """
         Generates obstacles while ensuring a continuous clearance zone.
         """

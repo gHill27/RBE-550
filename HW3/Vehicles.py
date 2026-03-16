@@ -286,9 +286,9 @@ class Vehicle(ABC):
         """The 'Master' check for boundary and collisions."""
         # 1. Generate footprint
         footprints = self.get_footprint(*state)
+        # 2. Boundary Check (Entire shell must be inside 0-35.99m)
+        world_box = box(0.01, 0.01, 35.99, 35.99)
         for footprint in footprints:
-            # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-            world_box = box(0.01, 0.01, 35.99, 35.99)
             if not footprint.within(world_box):
                 return False
 
@@ -298,7 +298,7 @@ class Vehicle(ABC):
             ):
                 return False
 
-            return True
+        return True
 
     def prepare_obstacles(self, obstacle_List: List[Tuple[int, int]], cell_size=3):
         """
@@ -318,11 +318,3 @@ class Vehicle(ABC):
 
         # Combine all boxes into one complex shape (highly optimized for checking)
         self.full_obstacle_geometry = unary_union(polys)
-
-
-
-
-
-
-
-
