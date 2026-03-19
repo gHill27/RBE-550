@@ -60,9 +60,14 @@ class Police(Vehicle):
 
     def main_run(self):
         # Run the planner
+        import time
+        start = time.time()
         path = self.plan((self.goal_state),step_distance=1)
+        end = time.time()
+        print(f"Time taken: {end - start} seconds")
         if path:
             print("Starting Simulation...")
+            print(f"Path found with {len(path)} nodes.")
             sim = PathSimulator(self, path)
             sim.run(velocity=6.0)  # Adjust speed here
         #path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=1)

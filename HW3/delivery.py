@@ -3,6 +3,7 @@ from typing import Callable,List,Tuple
 from pathSimulator import PathSimulator
 import math
 from math import * 
+import time
 
 class Delivery(Vehicle):
     """
@@ -59,9 +60,14 @@ class Delivery(Vehicle):
         return point
 
     def main_run(self):
-        # Run the planner
+        # Run the plannerimport time
+        start = time.time()
+        path = self.plan(...)
         path = self.plan(self.goal_state,step_distance=0.3)
+        end = time.time()
+        print(f"Time taken: {end - start} seconds")
         if path:
             print("Starting Simulation...")
+            print(f"Path found with {len(path)} nodes.")
             sim = PathSimulator(self, path)
             sim.run(velocity=6.0)

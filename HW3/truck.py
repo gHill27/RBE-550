@@ -107,8 +107,12 @@ class Truck(Vehicle):
     
     def main_run(self):
         step_distance  = 1.5
+        import time
+        start = time.time()        
         self.lut = TruckTrailerLUT(step_dist= step_distance, L=self.L, d1 = self.d1)
         path = self.plan(self.goal_state, step_distance=step_distance)
+        end = time.time()
+        print(f"Time taken: {end - start} seconds")
         if path:
             print("Starting Simulation...")
             print(f"Path found with {len(path)} nodes.") 
