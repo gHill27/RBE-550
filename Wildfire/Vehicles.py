@@ -122,9 +122,9 @@ class Vehicle(ABC):
 
                 # creates bins for less repeated checks
                 snapped_neighbor = self.snap_to_grid(
-                    raw_neighbor, res=(step_distance * 0.4)
+                    raw_neighbor, res=(step_distance * 0.4), angle_res=5
                 )
-                curr_snapped = self.snap_to_grid(current_state, res=(step_distance*0.4))
+                curr_snapped = self.snap_to_grid(current_state, res=(step_distance*0.4),angle_res=5)
 
                 # checks if the state is valid using raw neighbor
                 if not self.is_state_valid(raw_neighbor):
@@ -176,7 +176,7 @@ class Vehicle(ABC):
         return path[::-1]  # Return reversed path
 
     def snap_to_grid(
-        self, state: tuple[float, float, float], res, angle_res=22.5
+        self, state: tuple[float, float, float], res, angle_res=15.0
     ) -> tuple:
         """
         Discretizes a continuous state into a hashable 'bin' for the A* dictionaries.
@@ -273,7 +273,7 @@ class Vehicle(ABC):
         # 1. Generate footprint
         footprints = self.get_footprint(*state)
         # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-        world_box = box(0.01, 0.01, self.map.cell_size*self.map.grid_num -0.01, self.map.cell_size*self.map.grid_num-0.01)
+        world_box = box(0.01, 0.01, self.map.cell_size*self.map.grid_num , self.map.cell_size*self.map.grid_num)
         for footprint in footprints:
             if not footprint.within(world_box):
                 return False

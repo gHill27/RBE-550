@@ -101,7 +101,7 @@ class Map:
                 break
             elif currStatus == Status.INTACT and status == Status.BURNING:
                 self.obstacle_coordinate_dict[coord]["status"] = status
-                self.set_burn_time[coord]
+                self.set_burn_time(coord)
             elif currStatus == Status.BURNED | currStatus == Status.EXTINGUISHED:
                 break
 
