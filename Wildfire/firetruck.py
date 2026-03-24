@@ -6,19 +6,21 @@ from math import *
 
 
 class Firetruck(Vehicle):
-    def __init__(self, startPose, map, plot = None,goalPose = None):
+    def __init__(self, startPose, map,goalPose, plot = None):
         super().__init__(
-            width=5.2,
-            height=1.8,
+            width=4.9,
+            height=2.2,
             startState=startPose,
             goalState=goalPose,
             map=map,
             plot=plot,
         )
+        self.minimum_turn_radius = 13
+        self.max_velocity = 10
 
     def calculate_motion_primitives(self, step_distance):
         mp = {}
-        L = 2.8  # wheel base in meters
+        L = 3 # wheel base in meters
 
         # implementing 5 drive options: Hard left, slight left, Straight, slight right, Hard right
         steering_angles = [-30, -15, 0, 15, 30, 180]

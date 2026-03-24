@@ -58,7 +58,7 @@ class Vehicle(ABC):
         self.start_pos: State = startState  # (x,y,theta)
         self.goal_state: State = goalState
         self.map.generate_safe_map(startState,goalState)
-        self.prepare_obstacles(self.map.obstacle_coordinate_list)
+        self.prepare_obstacles(self.map.obstacle_coordinate_dict)
         if plot:
             self.viz = PlannerVisualizer((width, height))
         else:
@@ -109,7 +109,7 @@ class Vehicle(ABC):
                     self.viz.show_final(
                         final_path,
                         costHistory,
-                        self.map.obstacle_coordinate_list,
+                        self.map.obstacle_coordinate_dict.keys(),
                         goal,
                     )
                 return final_path
@@ -151,7 +151,7 @@ class Vehicle(ABC):
                 self.viz.update(
                     raw_neighbor,
                     costHistory,
-                    self.map.obstacle_coordinate_list,
+                    self.map.obstacle_coordinate_dict.keys(),
                     goal,
                 )
             count += 1
@@ -271,7 +271,7 @@ class Vehicle(ABC):
         # 1. Generate footprint
         footprints = self.get_footprint(*state)
         # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-        world_box = box(0.01, 0.01, 35.99, 35.99)
+        world_box = box(0.01, 0.01, 249.99, 249.99)
         for footprint in footprints:
             if not footprint.within(world_box):
                 return False
