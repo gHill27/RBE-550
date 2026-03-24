@@ -1,14 +1,16 @@
-from Vehicles import Vehicle,State,Map
-from typing import Callable,List,Tuple
+from Vehicles import Vehicle, State, Map
+from typing import Callable, List, Tuple
 from pathSimulator import PathSimulator
 import math
-from math import * 
+from math import *
 import time
+
 
 class Delivery(Vehicle):
     """
     A specific implementation of a Delivery robot using A* State Lattice.
     """
+
     def __init__(self, startPose: State, goalPose: State, map: Map = None, plot=False):
         super().__init__(
             height=0.7,
@@ -63,7 +65,7 @@ class Delivery(Vehicle):
         # Run the plannerimport time
         start = time.time()
         path = self.plan(...)
-        path = self.plan(self.goal_state,step_distance=0.3)
+        path = self.plan(self.goal_state, step_distance=0.3)
         end = time.time()
         print(f"Time taken: {end - start} seconds")
         if path:

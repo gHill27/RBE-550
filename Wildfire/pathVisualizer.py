@@ -10,14 +10,13 @@ import math
 from typing import List
 
 
-
 class PlannerVisualizer:
     def __init__(
         self,
         vechile_size: tuple[float, float],
         title="Live State Lattice Planner",
         grid_size=36,
-        vehicle = None
+        vehicle=None,
     ):
         plt.ion()  # Turn on interactive mode
         self.fig, self.ax = plt.subplots(figsize=(8, 8))
@@ -28,8 +27,8 @@ class PlannerVisualizer:
         # Setup the static grid once
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        #self.ax.invert_yaxis()
-        #self.ax.xaxis.tick_top()
+        # self.ax.invert_yaxis()
+        # self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.5)
 
@@ -41,15 +40,22 @@ class PlannerVisualizer:
     def _create_vehicle_polygon(self, Pose):
         if self.vehicle:
             # We pass the coordinates to the Truck's get_footprint method
-            x,y,t, = Pose[:3]
+            (
+                x,
+                y,
+                t,
+            ) = Pose[:3]
             t1 = Pose[3] if len(Pose) > 3 else t
-            return self.vehicle.get_footprint(x,y,t,t1)
+            return self.vehicle.get_footprint(x, y, t, t1)
         else:
             rect = box(
-                -self.v_width / 2, -self.v_height / 2, self.v_width / 2, self.v_height / 2
+                -self.v_width / 2,
+                -self.v_height / 2,
+                self.v_width / 2,
+                self.v_height / 2,
             )
             rotated = rotate(rect, Pose[2], origin=(0, 0))
-            return translate(rotated, Pose[0],Pose[1])
+            return translate(rotated, Pose[0], Pose[1])
 
     def show_goal_with_arrow(self, goal_state):
         """
@@ -77,7 +83,7 @@ class PlannerVisualizer:
         # Re-apply static settings after clear
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        #self.ax.xaxis.tick_top()
+        # self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.3)
 
@@ -103,11 +109,11 @@ class PlannerVisualizer:
 
         # 3. Draw Current Vehicle Position
         polys = self._create_vehicle_polygon(current_pos)
-        if not isinstance(polys,List):
+        if not isinstance(polys, List):
             polys = [polys]
         for poly in polys:
             # Handle both Polygon (single car) and MultiPolygon (Truck + Trailer)
-            if poly.geom_type == 'Polygon':
+            if poly.geom_type == "Polygon":
                 geoms = [poly]
             else:
                 # This extracts the individual Polygons from the MultiPolygon
@@ -142,16 +148,16 @@ class PlannerVisualizer:
                 # Draw every 5th footprint to keep it readable
                 if i % 5 == 0 or i == len(path) - 1:
                     polys = self._create_vehicle_polygon(state)
-                    if not isinstance(polys,List):
+                    if not isinstance(polys, List):
                         polys = [polys]
                     for poly in polys:
-                        geoms = [poly] if poly.geom_type == 'Polygon' else poly.geoms
+                        geoms = [poly] if poly.geom_type == "Polygon" else poly.geoms
                         alpha = 0.05 if i < len(path) - 1 else 0.8
                         for p in geoms:
                             ex_x, ex_y = p.exterior.xy
-                            self.ax.fill(ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue")
+                            self.ax.fill(
+                                ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue"
+                            )
 
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open
-
-    

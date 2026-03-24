@@ -1,12 +1,12 @@
-from Vehicles import Vehicle,Map,State
-from typing import List,Callable,Tuple
+from Vehicles import Vehicle, Map, State
+from typing import List, Callable, Tuple
 import math
 from pathSimulator import PathSimulator
 from math import *
 
 
 class Firetruck(Vehicle):
-    def __init__(self, startPose, map,goalPose, plot = None):
+    def __init__(self, startPose, map, goalPose, plot=None):
         super().__init__(
             width=4.9,
             height=2.2,
@@ -20,7 +20,7 @@ class Firetruck(Vehicle):
 
     def calculate_motion_primitives(self, step_distance):
         mp = {}
-        L = 3 # wheel base in meters
+        L = 3  # wheel base in meters
 
         # implementing 5 drive options: Hard left, slight left, Straight, slight right, Hard right
         steering_angles = [-30, -15, 0, 15, 30, 180]
@@ -63,8 +63,9 @@ class Firetruck(Vehicle):
     def main_run(self):
         # Run the planner
         import time
+
         start = time.time()
-        path = self.plan((self.goal_state),step_distance=1)
+        path = self.plan((self.goal_state), step_distance=1)
         end = time.time()
         print(f"Time taken: {end - start} seconds")
         if path:
@@ -72,4 +73,4 @@ class Firetruck(Vehicle):
             print(f"Path found with {len(path)} nodes.")
             sim = PathSimulator(self, path)
             sim.run(velocity=6.0)  # Adjust speed here
-        #path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=1)
+        # path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=1)

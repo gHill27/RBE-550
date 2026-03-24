@@ -9,7 +9,8 @@ from enum import Enum
 from collections import deque
 from typing import Optional
 
-from shapely import Point,box
+from shapely import Point, box
+
 
 class Map:
 
@@ -23,10 +24,9 @@ class Map:
         self.is_map_full = False
         self.goal_pos: Optional[tuple[float, float, float]] = None  # to be updated
         self.obstacle_coordinate_list = []
-        #self._generate_goal()
+        # self._generate_goal()
 
-
-    def update_goal(self,goal:tuple[float,float,float]):
+    def update_goal(self, goal: tuple[float, float, float]):
         self.goal_pos = goal
 
     def generate_safe_map(self, start_pos, goal_pos, buffer_radius=6.0):
@@ -37,7 +37,7 @@ class Map:
 
         safe_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
         safe_goal = Point(goal_pos[0], goal_pos[1]).buffer(buffer_radius)
-        
+
         final_obstacles = []
         cell_size = 3
 
@@ -46,17 +46,21 @@ class Map:
         # Logic to pick random row/cols
         for row, col in candidate_coordinates:
             # Create the physical box for this obstacle
-            obs_box = box(row * cell_size, col * cell_size, 
-                        (row + 1) * cell_size, (col + 1) * cell_size)
-            
+            obs_box = box(
+                row * cell_size,
+                col * cell_size,
+                (row + 1) * cell_size,
+                (col + 1) * cell_size,
+            )
+
             # CONTINUOUS CHECK:
             # If the box overlaps the 3m circle around start or goal, skip it.
             if obs_box.intersects(safe_start) or obs_box.intersects(safe_goal):
                 continue
-                
+
             final_obstacles.append((row, col))
         self.obstacle_coordinate_list = final_obstacles
-    
+
     def check_valid_cell(self, coordinate):
         """
         This will be used to check if the hero has access to the square
@@ -103,7 +107,12 @@ class Map:
             return new_coordinate
 
     def check_cell_occupied(self, new_coordinate):
-        if new_coordinate in self.obstacle_coordinate_list or new_coordinate in [(0, 0),(1,0),(0,1),(1,1)]:
+        if new_coordinate in self.obstacle_coordinate_list or new_coordinate in [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+        ]:
             return True
         if self.goal_pos:
             # Check if this grid cell contains the goal
@@ -184,14 +193,10 @@ class Map:
         obstacle_list = []
         while (
             not self.is_map_full
-            and len(obstacle_list)
-            < self.grid_num * self.grid_num * self.fill_percent
+            and len(obstacle_list) < self.grid_num * self.grid_num * self.fill_percent
         ):
-            obstacles = (self.generate_field_obstacle(self.generate_random_tetromino()))
+            obstacles = self.generate_field_obstacle(self.generate_random_tetromino())
             if obstacles:
                 obstacle_list.extend(obstacles)
 
         return obstacle_list
-           
-
-

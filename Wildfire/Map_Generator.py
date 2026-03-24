@@ -10,14 +10,16 @@ from queue import Queue
 from collections import deque
 from typing import Optional
 
-from shapely import Point,box
+from shapely import Point, box
 import time
+
 
 class Status(Enum):
     INTACT = auto()
     BURNING = auto()
     EXTINGUISHED = auto()
     BURNED = auto()
+
 
 class Map:
 
@@ -26,73 +28,84 @@ class Map:
         self.grid_num = Grid_num
         self.cell_size = cell_size
         self.fill_percent = fill_percent
-        self.obstacle_coordinate_dict = {} # dict of dicts { coordinate: {'status': Status.status, 'burn_time': none, 'extinguish_time' : None}}
-        self.obstacle_set = set() #all coordinates for quicker collisions and lookups. 
+        self.obstacle_coordinate_dict = (
+            {}
+        )  # dict of dicts { coordinate: {'status': Status.status, 'burn_time': none, 'extinguish_time' : None}}
+        self.obstacle_set = set()  # all coordinates for quicker collisions and lookups.
         self.is_map_full = False
         self.goal_pos: Optional[tuple[float, float, float]] = None  # to be updated
         self.sim_time = 0.0
-        self.generate_safe_map((1,1,0),(10,10,0))
+        self.generate_safe_map((1, 1, 0), (10, 10, 0))
         # self.set_status_on_obstacles(,Status.BURNING)
-       
-
 
     def main(self):
-        #repeats for every 0.1s of sim time
+        # repeats for every 0.1s of sim time
         self.update_sim_time()
         self.check_all_timers()
         if self.sim_time > 3600:
-            return 'Done'
+            return "Done"
 
     def update_sim_time(self):
         self.sim_time += 0.1
 
         if self.sim_time > 3600:
-            print(f'WARNING TIME IS ABOVE THE 3600 SECOND THRESHOLD!!! END SEQUENCE NOW')
+            print(
+                f"WARNING TIME IS ABOVE THE 3600 SECOND THRESHOLD!!! END SEQUENCE NOW"
+            )
 
-
-    def update_burn_time(self, coordinate, extinguish_start_time = None):
-        #open a thread which just puts the time differential of the when the timers started and the current elapsed time
-        #obstacles burning will be put into a dictionary of {(coordinate pair): (start_burn_time, start_extinguished_time)}
-        #extinguished time will be set to NONE until firetruck has approached the block, changing it to current sim time.
-        #this function will continuously mututate the currentElapsedtime part of the tuple for other logic checkers to use. 
-        burn_time = self.obstacle_coordinate_dict[coordinate]['burn_time']
+    def set_burn_time(self, coordinate):
+        # open a thread which just puts the time differential of the when the timers started and the current elapsed time
+        # obstacles burning will be put into a dictionary of {(coordinate pair): (start_burn_time, start_extinguished_time)}
+        # extinguished time will be set to NONE until firetruck has approached the block, changing it to current sim time.
+        # this function will continuously mututate the currentElapsedtime part of the tuple for other logic checkers to use.
+        burn_time = self.obstacle_coordinate_dict[coordinate]["burn_time"]
         if burn_time is None:
-            self.obstacle_coordinate_dict[coordinate]['burn_time'] = (self.sim_time)
+            self.obstacle_coordinate_dict[coordinate]["burn_time"] = self.sim_time
         else:
-            if self.sim_time - burn_time > 30:
-                self.set_status_on_obstacles(coordinate,Status.BURNED)
-            
-            elif self.sim_time - burn_time > 10:
+            print("Already has burn time!")
 
-                nearby_obstacles = self.find_burnable_obstacles()
-                self.set_status_on_obstacles(nearby_obstacles,Status.BURNING)
-                pass
-            
+    def check_time_events(self):
+        for coordinate, dictionary in self.obstacle_coordinate_dict:
+            burn_time = dictionary["burn_time"]
+            if burn_time:
+                if self.sim_time - burn_time > 30:
+                    self.set_status_on_obstacles(coordinate, Status.BURNED)
+                    self._delete_obstacle(coordinate)
+
+                elif self.sim_time - burn_time > 10:
+                    nearby_obstacles = self.find_burnable_obstacles()
+                    self.set_status_on_obstacles(nearby_obstacles, Status.BURNING)
+
     def find_burnable_obstacles(self, coordinate, radius_cells=6):
-        center_x ,center_y = coordinate
+        center_x, center_y = coordinate
         found_obstacles = []
-        
+
         # Iterate through the grid bounds
         for x in range(center_x - radius_cells, center_x + radius_cells + 1):
             for y in range(center_y - radius_cells, center_y + radius_cells + 1):
-                
-                # Use Euclidean distance to keep it a true 30m circle
-                if (x - center_x)**2 + (y - center_y)**2 <= radius_cells**2:
-                    if (x, y) in self.obstacle_set: 
-                        found_obstacles.append((x, y))
-                        
-        return found_obstacles
-        
 
-    def set_status_on_obstacles(self,coordinates:list[tuple[float,float]],status:Status):
+                # Use Euclidean distance to keep it a true 30m circle
+                if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius_cells**2:
+                    if (x, y) in self.obstacle_set:
+                        found_obstacles.append((x, y))
+
+        return found_obstacles
+
+    def set_status_on_obstacles(
+        self, coordinates: list[tuple[float, float]], status: Status
+    ):
         # obstacles_to_change_status = self.find_neighbor_obstacles(coordinate=coordinate)
         for coord in coordinates:
-            self.obstacle_coordinate_dict[coord]['status'] = status
-            if status is Status.BURNING:
-                self.update_burn_time[coord]
+            currStatus = self.obstacle_coordinate_dict[coord]["status"]
+            if currStatus == status:
+                break
+            elif currStatus == Status.INTACT and status == Status.BURNING:
+                self.obstacle_coordinate_dict[coord]["status"] = status
+                self.set_burn_time[coord]
+            elif currStatus == Status.BURNED | currStatus == Status.EXTINGUISHED:
+                break
 
-
-    def update_goal(self,goal:tuple[float,float,float]):
+    def update_goal(self, goal: tuple[float, float, float]):
         self.goal_pos = goal
 
     def generate_safe_map(self, start_pos, goal_pos, buffer_radius=4.0):
@@ -103,7 +116,7 @@ class Map:
 
         safe_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
         safe_goal = Point(goal_pos[0], goal_pos[1]).buffer(buffer_radius)
-        
+
         final_obstacles = []
         cell_size = 5
 
@@ -111,16 +124,20 @@ class Map:
         # Logic to pick random row/cols
         for row, col in candidate_coordinates:
             # Create the physical box for this obstacle
-            obs_box = box(row * cell_size, col * cell_size, 
-                        (row + 1) * cell_size, (col + 1) * cell_size)
-            
+            obs_box = box(
+                row * cell_size,
+                col * cell_size,
+                (row + 1) * cell_size,
+                (col + 1) * cell_size,
+            )
+
             # CONTINUOUS CHECK:
             # If the box overlaps the 3m circle around start or goal, skip it.
             if obs_box.intersects(safe_start) or obs_box.intersects(safe_goal):
                 continue
-                
+
             final_obstacles.append((row, col))
-        
+
         for obstacle in final_obstacles:
             self._append_new_obstacle(obstacle)
 
@@ -138,30 +155,41 @@ class Map:
             return False
         return True
 
-
-    def find_neighbor_obstacles(self,coordinate:tuple[float,float]):
-        DIRECTIONS = [(1,0), (1,1),(0,1),(0,-1),(-1,-1),(1,-1),(-1,1),(-1,0)]
+    def find_neighbor_obstacles(self, coordinate: tuple[float, float]):
+        DIRECTIONS = [
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (0, -1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (-1, 0),
+        ]
         all_connected_obstacles = []
         queue = Queue()
         queue.put(coordinate)
         while not queue.empty:
             currCoord = queue.get()
             for direction in DIRECTIONS:
-                x,y = currCoord
-                dx,dy = direction
-                new_coord = (x+dx,y+dy)
+                x, y = currCoord
+                dx, dy = direction
+                new_coord = (x + dx, y + dy)
                 if new_coord in self.obstacle_set:
                     all_connected_obstacles.append(new_coord)
                     queue.put(new_coord)
-        
+
         return all_connected_obstacles
 
-
     def _append_new_obstacle(self, coordinate):
-        self.obstacle_coordinate_dict[coordinate] = {'status': Status.INTACT,'burn_time' : None, 'extinguish_time' : None}
+        self.obstacle_coordinate_dict[coordinate] = {
+            "status": Status.INTACT,
+            "burn_time": None,
+            "extinguish_time": None,
+        }
         self.obstacle_set.add(coordinate)
 
-    def _delete_obstacle(self,coordinate):
+    def _delete_obstacle(self, coordinate):
         del self.obstacle_coordinate_dict[coordinate]
         self.obstacle_set.remove(coordinate)
 
@@ -193,7 +221,12 @@ class Map:
             return new_coordinate
 
     def check_cell_occupied(self, new_coordinate):
-        if new_coordinate in self.obstacle_set or new_coordinate in [(0, 0),(1,0),(0,1),(1,1)]:
+        if new_coordinate in self.obstacle_set or new_coordinate in [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+        ]:
             return True
         if self.goal_pos:
             # Check if this grid cell contains the goal
@@ -273,14 +306,10 @@ class Map:
         obstacle_list = []
         while (
             not self.is_map_full
-            and len(obstacle_list)
-            < self.grid_num * self.grid_num * self.fill_percent
+            and len(obstacle_list) < self.grid_num * self.grid_num * self.fill_percent
         ):
-            obstacles = (self.generate_field_obstacle(self.generate_random_tetromino()))
+            obstacles = self.generate_field_obstacle(self.generate_random_tetromino())
             if obstacles:
                 obstacle_list.extend(obstacles)
 
         return obstacle_list
-           
-
-

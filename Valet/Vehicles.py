@@ -57,7 +57,7 @@ class Vehicle(ABC):
         self.exploredNodes: dict[State, State] = {}
         self.start_pos: State = startState  # (x,y,theta)
         self.goal_state: State = goalState
-        self.map.generate_safe_map(startState,goalState)
+        self.map.generate_safe_map(startState, goalState)
         self.prepare_obstacles(self.map.obstacle_coordinate_list)
         if plot:
             self.viz = PlannerVisualizer((width, height))
@@ -121,7 +121,9 @@ class Vehicle(ABC):
             for raw_neighbor in neighbors:
 
                 # creates bins for less repeated checks
-                snapped_neighbor = self.snap_to_grid(raw_neighbor,res=(step_distance*0.4))
+                snapped_neighbor = self.snap_to_grid(
+                    raw_neighbor, res=(step_distance * 0.4)
+                )
 
                 # checks if the state is valid using raw neighbor
                 if not self.is_state_valid(raw_neighbor):
@@ -192,7 +194,6 @@ class Vehicle(ABC):
         snapped_x = round(x / res) * res
         snapped_y = round(y / res) * res
         snapped_theta = (round(theta / angle_res) * angle_res) % 360
-        
 
         # We return a tuple of rounded values to use as a dictionary key
         return (round(snapped_x, 1), round(snapped_y, 1), round(snapped_theta, 1))
