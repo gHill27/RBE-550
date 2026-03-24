@@ -5,18 +5,20 @@ from pathSimulator import PathSimulator
 from math import *
 
 
+
 class Firetruck(Vehicle):
-    def __init__(self, startPose, map, goalPose, plot=None):
+    def __init__(self, startPose, map, plot=None):
         super().__init__(
             width=4.9,
             height=2.2,
             startState=startPose,
-            goalState=goalPose,
+            goalState=None,
             map=map,
             plot=plot,
         )
         self.minimum_turn_radius = 13
-        self.max_velocity = 10
+        self.max_velocity = 10         
+            
 
     def calculate_motion_primitives(self, step_distance):
         mp = {}
@@ -65,7 +67,7 @@ class Firetruck(Vehicle):
         import time
 
         start = time.time()
-        path = self.plan((self.goal_state), step_distance=1)
+        path = self.plan((self.map.find_firetruck_goal()), step_distance=1)
         end = time.time()
         print(f"Time taken: {end - start} seconds")
         if path:

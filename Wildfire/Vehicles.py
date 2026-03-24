@@ -57,7 +57,6 @@ class Vehicle(ABC):
         self.exploredNodes: dict[State, State] = {}
         self.start_pos: State = startState  # (x,y,theta)
         self.goal_state: State = goalState
-        self.map.generate_safe_map(startState, goalState)
         self.prepare_obstacles(self.map.obstacle_set)
         if plot:
             self.viz = PlannerVisualizer((width, height))
@@ -69,7 +68,7 @@ class Vehicle(ABC):
         )
 
     def plan(
-        self, goal: State, step_size: int = 1000, step_distance: float = 0.5
+        self, goal: State, step_size: int = 10, step_distance: float = 0.5
     ) -> Optional[List[State]]:
         """
         Performs an A* search on the state lattice.

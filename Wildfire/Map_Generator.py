@@ -12,6 +12,7 @@ from typing import Optional
 
 from shapely import Point, box
 import time
+import math
 
 
 class Status(Enum):
@@ -20,10 +21,12 @@ class Status(Enum):
     EXTINGUISHED = auto()
     BURNED = auto()
 
+RED = "\033[31m"
+RESET = "\033[0m"
 
 class Map:
 
-    def __init__(self, Grid_num, cell_size, fill_percent: float):
+    def __init__(self, Grid_num, cell_size, fill_percent: float, firetruck_pose: Optional[tuple[float]] = None, wumpus_pose:Optional[tuple[float]] = None):
         # each cell is 5 meters by 5 meters in real distance
         self.grid_num = Grid_num
         self.cell_size = cell_size
@@ -32,9 +35,17 @@ class Map:
             {} # dict of dicts { coordinate: {'status': Status.status, 'burn_time': none, 'extinguish_time' : None}}
         )  
         self.obstacle_set = set()  # all coordinates for quicker collisions and lookups.
+        self.active_fires = set()
         self.is_map_full = False
-        self.goal_pos: Optional[tuple[float, float, float]] = None  # to be updated
+        self.firetruck_goal: Optional[tuple[float, float, float]] = None  # to be updated
         self.sim_time = 0.0
+        # add firetruck location and wumpus location for generate safe map
+        self.firetruck_pose = firetruck_pose
+        self.wumpus_pose = wumpus_pose
+        try:
+            self.generate_safe_map(firetruck_pose,wumpus_pose,buffer_radius=6)
+        except Exception:
+            print(f'Firetruck has pose {firetruck_pose}, wumpus has pose {wumpus_pose} \n cannot generate obstacles!')
         
 
     def main(self):
@@ -98,24 +109,74 @@ class Map:
         for coord in coordinates:
             currStatus = self.obstacle_coordinate_dict[coord]["status"]
             if currStatus == status:
-                break
-            elif currStatus == Status.INTACT and status == Status.BURNING:
-                self.obstacle_coordinate_dict[coord]["status"] = status
-                self.set_burn_time(coord)
-            elif currStatus == Status.BURNED | currStatus == Status.EXTINGUISHED:
-                break
+                continue
+            match currStatus:
+                case Status.EXTINGUISHED | Status.BURNED:
+                    continue
+                case Status.INTACT:
+                    self.obstacle_coordinate_dict[coord]["status"] = status
+                    if status == Status.BURNING:
+                        self.set_burn_time(coord)
+                        self.active_fires.add(coord)
+                case Status.BURNING:
+                        self.obstacle_coordinate_dict[coord]["status"] = status
+                        self.obstacle_coordinate_dict[coord]['burn_time'] = None
+                        self.obstacle_coordinate_dict[coord]['extinguish_time'] = None
+                        try: 
+                            self.active_fires.remove(coord)
+                        except KeyError:
+                            print('prematurely set to extinguished/burning without being in active fire list')
+                
 
     def update_goal(self, goal: tuple[float, float, float]):
-        self.goal_pos = goal
+        self.firetruck_goal = goal
 
-    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=6.0):
+    def find_firetruck_goal(self):
+        #finds the nearest burning obstacle and goes to extinguish it. 
+        #if no obstacles are on fire, use the wumpus location
+        if len(self.active_fires) == 0:
+            try:
+                return self.wumpus_pose #no fires go get the wumpus!!
+            except Exception as e:
+                print(f"{RED}Cannot get Wumpus and firetruck data! Error {e} {RESET}")
+                return (100.0,100.0,0)
+        else: 
+            fx,fy,ftheta = self.firetruck_pose
+            closest_dist = math.inf
+            for coordinate_pair in self.active_fires:
+                #basic beginner logic just go to closest one
+                distance = math.dist((fx,fy),coordinate_pair)
+                if distance < closest_dist:
+                    closest_dist = distance
+                    closest_coord = coordinate_pair
+                
+            #shorten vector such that the truck stops 1 cell short such that it doesn't crash
+            target_x, target_y =  closest_coord
+            dx = target_x - fx
+            dy = target_y - fy
+            distance = math.sqrt(dx**2 + dy**2)
+            angle_to_fire = math.degrees(math.atan2(dy, dx)) % 360
+            stop_distance = 7.0 
+            if distance <= stop_distance:
+                # We are already close enough! Just stay here and face the fire.
+                return (fx, fy, angle_to_fire)
+            
+            # Ratio of how far to travel vs total distance
+            ratio = (distance - stop_distance) / distance
+            
+            goal_x = fx + (dx * ratio)
+            goal_y = fy + (dy * ratio)
+            if (round(goal_x),round(goal_y)) in self.obstacle_set: return 'ERROR CANT GO HERE'
+            # Return the snapped goal for the A* planner
+            return (goal_x, goal_y, angle_to_fire)
+        
+    def generate_safe_map(self, start_pos, wumpus_pos, buffer_radius=6.0):
         """
         Generates obstacles while ensuring a continuous clearance zone.
         """
-        self.update_goal(goal_pos)
 
-        safe_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
-        safe_goal = Point(goal_pos[0], goal_pos[1]).buffer(buffer_radius)
+        safe_firetruck_start = Point(start_pos[0], start_pos[1]).buffer(buffer_radius)
+        safe_wumpus_start = Point(wumpus_pos[0], wumpus_pos[1]).buffer(buffer_radius)
 
         final_obstacles = []
         cell_size = 5
@@ -133,7 +194,7 @@ class Map:
 
             # CONTINUOUS CHECK:
             # If the box overlaps the 3m circle around start or goal, skip it.
-            if obs_box.intersects(safe_start) or obs_box.intersects(safe_goal):
+            if obs_box.intersects(safe_firetruck_start) or obs_box.intersects(safe_wumpus_start):
                 continue
 
             final_obstacles.append((row, col))
@@ -228,11 +289,11 @@ class Map:
             (1, 1),
         ]:
             return True
-        if self.goal_pos:
+        if self.firetruck_goal:
             # Check if this grid cell contains the goal
             goal_grid = (
-                int(self.goal_pos[0] / self.cell_size),
-                int(self.goal_pos[1] / self.cell_size),
+                int(self.firetruck_goal[0] / self.cell_size),
+                int(self.firetruck_goal[1] / self.cell_size),
             )
             if new_coordinate == goal_grid:
                 return True
@@ -247,7 +308,7 @@ class Map:
         free_coords = [c for c in all_coords if c not in self.obstacle_set]
 
         if not free_coords:
-            self.goal_pos = (
+            self.firetruck_goal = (
                 self.grid_num * self.cell_size / 2,
                 self.grid_num * self.cell_size / 2,
             )
@@ -256,7 +317,7 @@ class Map:
         target_cell = random.choice(free_coords)
 
         # 2. Convert grid index to real-world meters
-        self.goal_pos = (
+        self.firetruck_goal = (
             (target_cell[0] * self.cell_size) + (self.cell_size / 2),
             (target_cell[1] * self.cell_size) + (self.cell_size / 2),
         )
