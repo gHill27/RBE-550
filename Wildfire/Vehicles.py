@@ -58,7 +58,7 @@ class Vehicle(ABC):
         self.start_pos: State = startState  # (x,y,theta)
         self.goal_state: State = goalState
         self.map.generate_safe_map(startState, goalState)
-        self.prepare_obstacles(self.map.obstacle_coordinate_dict)
+        self.prepare_obstacles(self.map.obstacle_set)
         if plot:
             self.viz = PlannerVisualizer((width, height))
         else:
@@ -109,7 +109,7 @@ class Vehicle(ABC):
                     self.viz.show_final(
                         final_path,
                         costHistory,
-                        self.map.obstacle_coordinate_dict.keys(),
+                        self.map.obstacle_set,
                         goal,
                     )
                 return final_path
@@ -124,6 +124,7 @@ class Vehicle(ABC):
                 snapped_neighbor = self.snap_to_grid(
                     raw_neighbor, res=(step_distance * 0.4)
                 )
+                curr_snapped = self.snap_to_grid(current_state, res=(step_distance*0.4))
 
                 # checks if the state is valid using raw neighbor
                 if not self.is_state_valid(raw_neighbor):
@@ -142,7 +143,7 @@ class Vehicle(ABC):
                     or tentativeCostToCome < costHistory[snapped_neighbor]
                 ):
                     # This path to neighbor is better than any previous one
-                    came_from[snapped_neighbor] = current_state
+                    came_from[snapped_neighbor] = curr_snapped
                     costHistory[snapped_neighbor] = tentativeCostToCome
                     estimatedCost = tentativeCostToCome + self.calculate_heurisitic(
                         snapped_neighbor, goal
@@ -153,7 +154,7 @@ class Vehicle(ABC):
                 self.viz.update(
                     raw_neighbor,
                     costHistory,
-                    self.map.obstacle_coordinate_dict.keys(),
+                    self.map.obstacle_set,
                     goal,
                 )
             count += 1
@@ -272,7 +273,7 @@ class Vehicle(ABC):
         # 1. Generate footprint
         footprints = self.get_footprint(*state)
         # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-        world_box = box(0.01, 0.01, 249.99, 249.99)
+        world_box = box(0.01, 0.01, self.map.cell_size*self.map.grid_num -0.01, self.map.cell_size*self.map.grid_num-0.01)
         for footprint in footprints:
             if not footprint.within(world_box):
                 return False
@@ -286,7 +287,7 @@ class Vehicle(ABC):
         return True
 
     def prepare_obstacles(
-        self, obstacle_dict: dict[Tuple[int, int] : Status], cell_size=5
+        self, obstacle_set: set[Tuple[int, int] : Status], cell_size=5
     ):
         """
         Flattens individual grid obstacles into a single geometric 'map'.
@@ -296,7 +297,7 @@ class Vehicle(ABC):
         """
 
         polys = []
-        for row, col in obstacle_dict.keys():
+        for row, col in obstacle_set:
             # Create a 1x1 square for each obstacle coordinate
             # (x_min, y_min, x_max, y_max)
             x_min, y_min = row * cell_size, col * cell_size

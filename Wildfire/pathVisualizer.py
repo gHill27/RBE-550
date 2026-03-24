@@ -15,7 +15,7 @@ class PlannerVisualizer:
         self,
         vechile_size: tuple[float, float],
         title="Live State Lattice Planner",
-        grid_size=36,
+        grid_size=50,
         vehicle=None,
     ):
         plt.ion()  # Turn on interactive mode

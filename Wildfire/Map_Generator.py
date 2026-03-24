@@ -29,19 +29,18 @@ class Map:
         self.cell_size = cell_size
         self.fill_percent = fill_percent
         self.obstacle_coordinate_dict = (
-            {}
-        )  # dict of dicts { coordinate: {'status': Status.status, 'burn_time': none, 'extinguish_time' : None}}
+            {} # dict of dicts { coordinate: {'status': Status.status, 'burn_time': none, 'extinguish_time' : None}}
+        )  
         self.obstacle_set = set()  # all coordinates for quicker collisions and lookups.
         self.is_map_full = False
         self.goal_pos: Optional[tuple[float, float, float]] = None  # to be updated
         self.sim_time = 0.0
-        self.generate_safe_map((1, 1, 0), (10, 10, 0))
-        # self.set_status_on_obstacles(,Status.BURNING)
+        
 
     def main(self):
         # repeats for every 0.1s of sim time
         self.update_sim_time()
-        self.check_all_timers()
+        self.check_time_events()
         if self.sim_time > 3600:
             return "Done"
 
@@ -70,6 +69,7 @@ class Map:
             if burn_time:
                 if self.sim_time - burn_time > 30:
                     self.set_status_on_obstacles(coordinate, Status.BURNED)
+                    print(f'obstacle at coordinate {coordinate} has burned!')
                     self._delete_obstacle(coordinate)
 
                 elif self.sim_time - burn_time > 10:
@@ -108,7 +108,7 @@ class Map:
     def update_goal(self, goal: tuple[float, float, float]):
         self.goal_pos = goal
 
-    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=4.0):
+    def generate_safe_map(self, start_pos, goal_pos, buffer_radius=6.0):
         """
         Generates obstacles while ensuring a continuous clearance zone.
         """
