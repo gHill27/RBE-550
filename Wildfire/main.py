@@ -13,7 +13,7 @@ def main():
     firetruck.build_tree()
     firetruck.viz.plot_prm(map,firetruck.graph,firetruck.nodes)
     # print(firetruck.graph)
-    # firetruck.main_run()
+    firetruck.main_run()
     wumpus = Wumpus()
 
 

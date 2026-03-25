@@ -20,14 +20,14 @@ Point2D: TypeAlias = tuple[float, float]
 
 class Firetruck():
     def __init__(self, map:Map, plot=None):
-        self.width = 4.9
-        self.height = 2.2
         self.map:Map = map
         plot = plot
-
-
+        #Known constraints
+        self.width = 4.9
+        self.height = 2.2
         self.MIN_TURNING_RADIUS = 13
         self.MAX_VEL = 10
+        #variables used in funcitons
         self.nodes = []
         self.graph = {}  #index : neighbor_index  
         self.full_obstacle_geometry: Optional[Polygon] = None   
@@ -40,102 +40,8 @@ class Firetruck():
         self.base_footprint: Polygon = box(
             -self.width / 2, -self.height / 2, self.width / 2, self.height / 2
         )  
-            
-    def plan(
-        self, goal: State, step_size: int = 10, step_distance: float = 0.5
-    ) -> Optional[List[State]]:
-        """
-        Performs an A* search on the state lattice.
-
-        Args:
-            goal: The target (x, y, theta) coordinates.
-            step_size: Number of iterations between visualization updates.
-
-        Returns:
-            A list of States forming the path, or None if no path is found.
-        """
-        mp = self.calculate_motion_primitives(step_distance)
-        count = 0
-        start_node = self.start_pos
-        # open_list stores: (f_score, current_coord)
-        open_list = []
-        heapq.heappush(
-            open_list, (0 + self.calculate_heurisitic(start_node, goal), start_node)
-        )
-
-        # Track the best cost to reach a coordinate
-        costHistory: dict[State, float] = {start_node: 0}
-        # Track the path: {child_coord: parent_coord}
-        # each coord should include a tuple of (x,y,theta)
-        came_from: dict[State, State] = {}
-
-        while open_list:
-            # Get the node with the lowest f_score
-            _, current_state = heapq.heappop(open_list)
-
-            # Check if we are "close enough" to the goal (floating point friendly)
-            if self.is_near_goal(current_state, goal):
-                print("Goal Reached!")
-                self.exploredNodes = came_from
-                final_path = self.reconstruct_path(came_from, current_state)
-                if self.viz:
-                    self.viz.show_final(
-                        final_path,
-                        costHistory,
-                        self.map.obstacle_set,
-                        goal,
-                    )
-                return final_path
-
-            # Expand neighbors using motion primitives
-            neighbors = self.get_neighbors(
-                current_state=current_state, motion_primatives=mp
-            )
-            for raw_neighbor in neighbors:
-
-                # creates bins for less repeated checks
-                snapped_neighbor = self.snap_to_grid(
-                    raw_neighbor, res=(step_distance * 0.4), angle_res=5
-                )
-                curr_snapped = self.snap_to_grid(current_state, res=(step_distance*0.4),angle_res=5)
-
-                # checks if the state is valid using raw neighbor
-                if not self.is_state_valid(raw_neighbor):
-                    continue
-
-                # Assume constant cost of (step_distance) for each primitive
-                # Penalize the magnitude of the turn
-                angle_diff = abs((raw_neighbor[2] - current_state[2] + 180) % 360 - 180)
-                turn_penalty = (angle_diff / 15.0) * 0.2  # Scaled penalty
-                tentativeCostToCome = (
-                    costHistory[current_state] + step_distance + turn_penalty
-                )
-
-                if (
-                    snapped_neighbor not in costHistory
-                    or tentativeCostToCome < costHistory[snapped_neighbor]
-                ):
-                    # This path to neighbor is better than any previous one
-                    came_from[snapped_neighbor] = curr_snapped
-                    costHistory[snapped_neighbor] = tentativeCostToCome
-                    estimatedCost = tentativeCostToCome + self.calculate_heurisitic(
-                        snapped_neighbor, goal
-                    )
-                    heapq.heappush(open_list, (estimatedCost, snapped_neighbor))
-            # LIVE UPDATE CALL
-            if self.viz and count % step_size == 0:
-                self.viz.update(
-                    raw_neighbor,
-                    costHistory,
-                    self.map.obstacle_set,
-                    goal,
-                )
-            count += 1
-
-        self.exploredNodes = came_from
-        print("No path found.")
-        return None
-
+  #######################################################################################################
+  # Building the PRM Tree  
     def build_tree(self):
         """Main function to generate the roadmap."""
         # 1. Sample valid points
@@ -229,194 +135,110 @@ class Firetruck():
 
         # Combine all boxes into one complex shape (highly optimized for checking)
         self.full_obstacle_geometry = unary_union(polys)
+    
+#########################################################################################################
+# Traversal through the tree
+    def plan(self, goal_state: Tuple[float, float, float]):
+    # 1. Connect current truck pos to the web
+        start_idx = self.get_nearest_node((self.map.firetruck_pose[0], self.map.firetruck_pose[1]))
+        
+        # 2. Connect the fire (goal) to the web
+        goal_idx = self.get_nearest_node((goal_state[0], goal_state[1]))
 
+        if start_idx is None or goal_idx is None:
+            print("Could not connect start or goal to the PRM!")
+            return None
 
+        # 3. Search the web
+        path = self.a_star_prm(start_idx, goal_idx)
+        
+        # 4. Final step: add the actual goal_state to the end of the path
+        if path:
+            path.append(goal_state)
+            
+        return path
+    
+    def a_star_prm(self, start_idx: int, goal_idx: int) -> Optional[List[int]]:
+        # 1. Setup Priority Queue: (f_score, current_index)
+        open_list = []
+        # h(start) = distance from start_node to goal_node
+        h_start = math.dist(self.nodes[start_idx], self.nodes[goal_idx])
+        heapq.heappush(open_list, (h_start, start_idx))
+
+        # 2. Tracking Dictionaries
+        came_from = {} # To reconstruct the path: {child_idx: parent_idx}
+        g_score = {i: float('inf') for i in range(len(self.nodes))}
+        g_score[start_idx] = 0
+
+        while open_list:
+            _, current = heapq.heappop(open_list)
+
+            # Check if we reached the goal index
+            if current == goal_idx:
+                return self._reconstruct_index_path(came_from, current)
+
+            # Look at neighbors in the PRM graph
+            for neighbor in self.graph.get(current, []):
+                # Distance between current node and neighbor node
+                edge_weight = math.dist(self.nodes[current], self.nodes[neighbor])
+                tentative_g_score = g_score[current] + edge_weight
+
+                if tentative_g_score < g_score[neighbor]:
+                    # This path is better, record it.
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    
+                    # f = g + h
+                    h = math.dist(self.nodes[neighbor], self.nodes[goal_idx])
+                    f_score = tentative_g_score + h
+                    heapq.heappush(open_list, (f_score, neighbor))
+
+        return None # No path found through the web
+
+    def get_nearest_node(self, pos: Tuple[float, float]) -> Optional[int]:
+        """Finds the closest PRM node index with a clear line-of-sight."""
+        best_idx = None
+        min_dist = float('inf')
+
+        for i, node_pos in enumerate(self.nodes):
+            d = math.dist(pos, node_pos)
+            if d < min_dist:
+                # Only connect if there are no obstacles in the way!
+                if self._is_path_clear(pos, node_pos):
+                    min_dist = d
+                    best_idx = i
+        return best_idx
+
+    def _reconstruct_index_path(self, came_from, current):
+        """Converts the parent-pointers into a list of (x, y, theta) for the simulator."""
+        path = []
+        while current in came_from:
+            node_pos = self.nodes[current]
+            # We add 0.0 for theta as a placeholder; 
+            # the truck's controller usually handles the heading.
+            path.append((node_pos[0], node_pos[1], 0.0))
+            current = came_from[current]
+        
+        # Add the final start node and reverse
+        start_node = self.nodes[current]
+        path.append((start_node[0], start_node[1], 0.0))
+        return path[::-1]
+    
+    
+
+########################################################################################################
+# Main Loop
     def main_run(self):
         # Run the planner
         import time
 
         start = time.time()
-        path = self.plan((self.map.find_firetruck_goal()), step_distance=1)
+        path = self.plan((100,100,0))
         end = time.time()
         print(f"Time taken: {end - start} seconds")
         if path:
             print("Starting Simulation...")
             print(f"Path found with {len(path)} nodes.")
-            sim = PathSimulator(self, path)
-            sim.run(velocity=6.0)  # Adjust speed here
-        # path = self.plan((self.map.goal_pos[0],self.map.goal_pos[1],0),step_distance=1)
+            # sim = PathSimulator(self, path)
+            # sim.run(velocity=6.0)  # Adjust speed here
 
-##########################################################
-#HW3 code to refrence:
- # def calculate_motion_primitives(self, step_distance):
-    #     mp = {}
-    #     L = 3  # wheel base in meters
-
-    #     # implementing 5 drive options: Hard left, slight left, Straight, slight right, Hard right
-    #     steering_angles = [-30, -15, 0, 15, 30, 180]
-    #     for phi in steering_angles:
-    #         if abs(phi) == 0:
-    #             mp[phi] = (step_distance, 0, 0)
-    #         elif phi == 180:
-    #             mp[phi] = (-step_distance, 0, 0)
-    #         else:
-    #             # simplified integration
-    #             d_theta = round((step_distance / L) * math.tan(math.radians(phi)), 2)
-    #             dx = round(step_distance * math.cos(d_theta / 2), 2)
-    #             dy = round(step_distance * math.sin(d_theta / 2), 2)
-    #             mp[phi] = (dx, dy, round(math.degrees(d_theta), 2))
-    #     return mp
-
-    # def plan(self):
-    #     # A star plan along the current grid discovered through PRM
-    #     pass
-
-
-
-    # def get_neighbors(
-    #     self, current_state: State, motion_primatives: dict[float, tuple[float, float]]
-    # ) -> List[State]:
-    #     """
-    #     Generates possible neighboring states
-    #     """
-    #     cos = math.cos(math.radians(current_state[2]))
-    #     sin = math.sin(math.radians(current_state[2]))
-
-    #     neighbors = []
-    #     for key, value in motion_primatives.items():
-    #         dx, dy, dtheta = value[0], value[1], value[2]
-
-    #         rotated_dx = dx * cos - dy * sin
-    #         rotated_dy = dx * sin + dy * cos
-    #         raw_neighbor = (
-    #             current_state[0] + rotated_dx,
-    #             current_state[1] + rotated_dy,
-    #             (current_state[2] + dtheta) % 360,
-    #         )
-    #         neighbors.append(raw_neighbor)
-    #     return neighbors
-    
-    # def reconstruct_path(
-    #     self, came_from: dict[State, State], current: State
-    # ) -> list[State]:
-    #     """
-    #     Walks backward from the goal to the start using the parent pointers.
-    #     """
-    #     path = [current]
-    #     while current in came_from:
-    #         current = came_from[current]
-    #         path.append(current)
-    #     return path[::-1]  # Return reversed path
-
-    # def snap_to_grid(
-    #     self, state: tuple[float, float, float], res, angle_res=15.0
-    # ) -> tuple:
-    #     """
-    #     Discretizes a continuous state into a hashable 'bin' for the A* dictionaries.
-
-    #     Note: Logic refined in collaboration with Gemini AI to handle
-    #     floating-point precision issues in A* dictionaries.
-
-
-    #     Args:
-    #         state: (x, y, theta)
-    #         res: Spatial resolution in meters (e.g., 0.1m)
-    #         angle_res: Angular resolution in degrees
-    #     """
-    #     x, y, theta = state
-    #     # Rounding to the nearest multiple of the resolution
-    #     snapped_x = round(x / res) * res
-    #     snapped_y = round(y / res) * res
-    #     snapped_theta = (round(theta / angle_res) * angle_res) % 360
-
-    #     # We return a tuple of rounded values to use as a dictionary key
-    #     return (round(snapped_x, 1), round(snapped_y, 1), round(snapped_theta, 1))
-
-    # def is_near_goal(
-    #     self, state: State, goal: State, pos_threshold=0.4, angle_threshold=15
-    # ):
-    #     """
-    #     Checks if the robot is close enough to the goal in both position and heading.
-    #     """
-    #     curr_x, curr_y, curr_theta = state
-    #     goal_x, goal_y, goal_theta = goal
-
-    #     # 1. Position Check (Euclidean)
-    #     dist = math.sqrt((curr_x - goal_x) ** 2 + (curr_y - goal_y) ** 2)
-
-    #     # 2. Orientation Check
-    #     # We use a modular difference to handle 0/360 degree wrap-around
-    #     angle_diff = abs((curr_theta - goal_theta + 180) % 360 - 180)
-
-    #     return dist <= pos_threshold and angle_diff <= angle_threshold
-
-    # def calculate_heurisitic(
-    #     self, pose: State, goal: State, weight: float = 1.2, heading_weight: float = 0.5
-    # ) -> float:
-    #     """
-    #     Estimates the cost to reach the goal using Euclidean distance.
-
-    #     Args:
-    #         pose: Current (x, y, theta) state.
-    #         goal: The (x, y) target coordinates.
-    #     """
-    #     cost = round(
-    #         sqrt((goal[0] - pose[0]) ** 2 + (goal[1] - pose[1]) ** 2),
-    #         2,
-    #     )
-
-    #     # If we are close to the goal, start caring about the angle
-    #     if cost < 1.0:
-    #         angle_diff = abs((pose[2] - goal[2] + 180) % 360 - 180)
-    #         # Normalize angle diff so it doesn't overpower the distance
-    #         # (e.g., 180 degrees = 1.0 units of distance)
-    #         return (cost + (angle_diff / 180.0)) * heading_weight
-
-    #     return cost * weight
-
-    
-    # def get_neighbors(
-    #     self, current_state: State, motion_primatives: dict[float, tuple[float, float]]
-    # ) -> List[State]:
-    #     pass
-
-    # def get_footprint(self, x: float, y: float, theta: float) -> Polygon:
-    #     """
-    #     Calculates the physical space the vehicle occupies at a specific state.
-
-    #     Args:
-    #         x: The X coordinate of the vehicle center.
-    #         y: The Y coordinate of the vehicle center.
-    #         theta: Heading in degrees.
-
-    #     Returns:
-    #         A Shapely Polygon representing the transformed footprint.
-    #     """
-    #     rotated = rotate(self.base_footprint, theta, origin=(0, 0))
-    #     return [translate(rotated, xoff=x, yoff=y)]
-
-    
-    # def calculate_motion_primitives(
-    #     self, step_distance: float, step_precision: int = 16
-    # ) -> dict[float, tuple[float, float]]:
-    #     pass
-
-    # def is_state_valid(self, state: State) -> bool:
-    #     """The 'Master' check for boundary and collisions."""
-    #     # 1. Generate footprint
-    #     footprints = self.get_footprint(*state)
-    #     # 2. Boundary Check (Entire shell must be inside 0-35.99m)
-    #     world_box = box(0.01, 0.01, self.map.cell_size*self.map.grid_num , self.map.cell_size*self.map.grid_num)
-    #     for footprint in footprints:
-    #         if not footprint.within(world_box):
-    #             return False
-
-    #         # 3. Obstacle Check
-    #         if self.full_obstacle_geometry and footprint.intersects(
-    #             self.full_obstacle_geometry
-    #         ):
-    #             return False
-
-    #     return True
-
-    
