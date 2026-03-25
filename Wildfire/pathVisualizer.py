@@ -161,3 +161,46 @@ class PlannerVisualizer:
 
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open
+
+    def plot_prm(self,map,graph, nodes):
+        # Inside your main loop
+        ax = self.ax
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 8))
+        
+        # 1. Plot Obstacles (The "No-Go" zones)
+        # If using your map's obstacle_set (grid-based)
+        for (gx, gy) in map.obstacle_set:
+            # Convert grid back to world coordinates for plotting
+            rect = plt.Rectangle((gx * map.cell_size, gy * map.cell_size), 
+                                map.cell_size, map.cell_size, 
+                                color='black', alpha=0.5)
+            ax.add_patch(rect)
+
+        # 2. Plot Edges (The Connections)
+        # We loop through the adjacency list and draw lines between connected indices
+        for node_idx, neighbors in graph.items():
+            start_node = nodes[node_idx]
+            for neighbor_idx in neighbors:
+                end_node = nodes[neighbor_idx]
+                ax.plot([start_node[0], end_node[0]], 
+                        [start_node[1], end_node[1]], 
+                        color='blue', linewidth=0.5, alpha=0.6, zorder=1)
+
+        # 3. Plot Nodes (The Samples)
+        node_x = [n[0] for n in nodes]
+        node_y = [n[1] for n in nodes]
+        ax.scatter(node_x, node_y, color='red', s=10, zorder=2, label="Nodes")
+
+        # Formatting
+        limit = map.grid_num * map.cell_size
+        ax.set_xlim(0, limit)
+        ax.set_ylim(0, limit)
+        ax.set_aspect('equal')
+        ax.set_title(f"PRM Roadmap ({len(nodes)} Nodes)")
+        
+        plt.show(block=False) # Show the window without "freezing" the script yet
+        plt.pause(0.1)        # Give the window a moment to render
+
+        input("Press [Enter] in the terminal to close the PRM plot...") 
+        # The script stops here. The window stays open until you hit Enter.

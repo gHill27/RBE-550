@@ -75,7 +75,7 @@ class Map:
             print("Already has burn time!")
 
     def check_time_events(self):
-        for coordinate, dictionary in self.obstacle_coordinate_dict:
+        for coordinate, dictionary in self.obstacle_coordinate_dict.items():
             burn_time = dictionary["burn_time"]
             if burn_time:
                 if self.sim_time - burn_time > 30:
@@ -263,6 +263,7 @@ class Map:
     def generate_random_coord(self):
         """This function creates a random coordinate within the grid"""
         # 1. Create a list of all 16,384 possible (row, col) pairs
+        local_random = random.Random()
         all_coords = [
             (row, column)
             for row in range(self.grid_num)
@@ -270,7 +271,7 @@ class Map:
         ]
 
         # 2. Pick unique pairs automatically
-        sample = random.sample(all_coords, 1)
+        sample = local_random.sample(all_coords, 1)
         return sample[0]
 
     def find_open_square(self):
