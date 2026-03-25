@@ -162,7 +162,7 @@ class PlannerVisualizer:
         print("Planning Complete. Close the window to end the program.")
         plt.show()  # This is the "blocking" call that holds the grid open
 
-    def plot_prm(self,map,graph, nodes):
+    def plot_prm(self,map,graph, nodes, path=None):
         # Inside your main loop
         ax = self.ax
         if ax is None:
@@ -192,12 +192,23 @@ class PlannerVisualizer:
         node_y = [n[1] for n in nodes]
         ax.scatter(node_x, node_y, color='red', s=10, zorder=2, label="Nodes")
 
+        # 4. NEW: Plot the A* Path in Green
+        if path:
+            px = [p[0] for p in path]
+            py = [p[1] for p in path]
+            # Draw the lines
+            ax.plot(px, py, color='#2ecc71', linewidth=3, zorder=5, label="A* Path")
+            # Draw the path waypoints
+            ax.scatter(px, py, color='green', s=30, zorder=6)
+
         # Formatting
         limit = map.grid_num * map.cell_size
         ax.set_xlim(0, limit)
         ax.set_ylim(0, limit)
         ax.set_aspect('equal')
-        ax.set_title(f"PRM Roadmap ({len(nodes)} Nodes)")
+        ax.set_title(f"PRM Roadmap ({len(nodes)} Nodes) with A* Path")
+        ax.legend(loc = 'upper right')
+        
         
         plt.show(block=False) # Show the window without "freezing" the script yet
         plt.pause(0.1)        # Give the window a moment to render

@@ -1,6 +1,7 @@
 import heapq 
 import math
 import random
+import time
 from scipy.spatial import KDTree
 
 from shapely.geometry import box, Polygon, Point, LineString
@@ -229,16 +230,22 @@ class Firetruck():
 ########################################################################################################
 # Main Loop
     def main_run(self):
-        # Run the planner
-        import time
+        # 1. Build the roadmap
+        self.build_tree()
 
-        start = time.time()
-        path = self.plan((100,100,0))
-        end = time.time()
-        print(f"Time taken: {end - start} seconds")
+        # 2. Run the planner
+        start_time = time.time()
+        goal = (100, 100, 0)
+        path = self.plan(goal)
+        end_time = time.time()
+        
+        print(f"Time taken: {end_time - start_time:.4f} seconds")
+        
+        # 3. Visualize
+        if self.viz:
+            # We pass self.map, self.graph, self.nodes, and the new path
+            self.viz.plot_prm(self.map, self.graph, self.nodes, path=path)
+            
         if path:
-            print("Starting Simulation...")
-            print(f"Path found with {len(path)} nodes.")
-            # sim = PathSimulator(self, path)
-            # sim.run(velocity=6.0)  # Adjust speed here
+            print(f"Path found with {len(path)} waypoints.")
 

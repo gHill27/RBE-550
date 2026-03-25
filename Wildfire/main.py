@@ -10,9 +10,6 @@ def main():
     map = Map(Grid_num=50,cell_size=5, fill_percent=0.1,firetruck_pose=firetruck_pose,wumpus_pose=wumpus_pose)
     # print(map.obstacle_set)
     firetruck = Firetruck(map, plot=True)
-    firetruck.build_tree()
-    firetruck.viz.plot_prm(map,firetruck.graph,firetruck.nodes)
-    # print(firetruck.graph)
     firetruck.main_run()
     wumpus = Wumpus()
 
