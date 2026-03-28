@@ -183,7 +183,7 @@ class DubinsPlanner:
         )
 
     def interpolate_edge(
-        self, q_start: State, edge: DubinsEdge, step_size: float = 0.5
+        self, q_start: State, edge: DubinsEdge, step_size: float = 4.0
     ) -> List[State]:
         return self._interpolate(q_start, edge.seg_lengths,
                                  edge.path_type, step_size)
