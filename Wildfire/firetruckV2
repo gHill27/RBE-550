@@ -1,0 +1,508 @@
+"""
+car_cspace.py
+=============
+CarModel and ConfigurationSpace for a nonholonomic car PRM planner.
+
+Vehicle specs:
+  width:      2.2m
+  length:     4.9m
+  wheelbase:  3.0m
+  r_min:      13.0m
+  v_max:      10.0 m/s
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
+
+import numpy as np
+from shapely.geometry import Polygon, MultiPolygon, Point
+from shapely.affinity import rotate, translate
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.collections import PatchCollection
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+Config = Tuple[float, float, float]   # (x, y, theta_radians)
+
+
+# ---------------------------------------------------------------------------
+# CarModel
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CarModel:
+    """
+    Geometric and kinematic description of the car.
+
+    The footprint is defined in the car's LOCAL frame:
+      - Origin at the REAR AXLE centre (common robotics convention).
+      - +x points forward, +y points left.
+
+    Footprint corners (local frame, rear-axle origin):
+        rear-right : (-rear_overhang,  -width/2)
+        rear-left  : (-rear_overhang,   width/2)
+        front-left : ( wheelbase + front_overhang,  width/2)
+        front-right: ( wheelbase + front_overhang, -width/2)
+    """
+
+    # --- physical dimensions ---
+    width:           float = 2.2    # metres, side to side
+    length:          float = 4.9    # metres, front to rear bumper
+    wheelbase:       float = 3.0    # metres, rear axle to front axle
+
+    # --- kinematic limits ---
+    r_min:           float = 13.0   # metres, minimum turning radius
+    v_max:           float = 10.0   # m/s
+
+    # --- overhang (derived from length and wheelbase) ---
+    # Default: equal front/rear overhang split over the non-wheelbase length.
+    # Override if your car has asymmetric overhangs.
+    front_overhang:  Optional[float] = None
+    rear_overhang:   Optional[float] = None
+
+    def __post_init__(self):
+        overhang_total = self.length - self.wheelbase
+        if self.front_overhang is None:
+            self.front_overhang = overhang_total / 2.0
+        if self.rear_overhang is None:
+            self.rear_overhang = overhang_total / 2.0
+
+        # Validate
+        assert self.width > 0,      "width must be positive"
+        assert self.length > 0,     "length must be positive"
+        assert self.wheelbase > 0,  "wheelbase must be positive"
+        assert self.r_min > 0,      "r_min must be positive"
+        assert self.wheelbase <= self.length, \
+            "wheelbase cannot exceed total length"
+
+        # Pre-build the LOCAL footprint polygon (rear-axle origin, heading=0)
+        self._local_footprint: Polygon = self._build_local_footprint()
+
+    # ------------------------------------------------------------------
+    # Footprint helpers
+    # ------------------------------------------------------------------
+
+    def _build_local_footprint(self) -> Polygon:
+        """
+        Rectangle in local frame. Rear-axle at origin, heading along +x.
+        """
+        hw = self.width / 2.0
+        x_rear  = -self.rear_overhang
+        x_front =  self.wheelbase + self.front_overhang
+
+        corners = [
+            (x_rear,   -hw),
+            (x_rear,    hw),
+            (x_front,   hw),
+            (x_front,  -hw),
+        ]
+        return Polygon(corners)
+
+    def footprint_at(self, x: float, y: float, theta: float) -> Polygon:
+        """
+        Return the car footprint as a Shapely Polygon in WORLD frame,
+        placed at rear-axle position (x, y) with heading theta (radians).
+
+        Steps:
+          1. Rotate local footprint by theta around origin.
+          2. Translate to world position (x, y).
+        """
+        # Rotate in place (Shapely rotate: angle in degrees, origin=(0,0))
+        rotated = rotate(
+            self._local_footprint,
+            angle=math.degrees(theta),
+            origin=(0.0, 0.0),
+            use_radians=False,
+        )
+        # Translate to world position
+        world = translate(rotated, xoff=x, yoff=y)
+        return world
+
+    @property
+    def max_steering_angle(self) -> float:
+        """
+        Max steering angle (radians) from Ackermann geometry:
+            delta_max = arctan(wheelbase / r_min)
+        """
+        return math.atan(self.wheelbase / self.r_min)
+
+    def __repr__(self) -> str:
+        return (
+            f"CarModel(length={self.length}m, width={self.width}m, "
+            f"wheelbase={self.wheelbase}m, r_min={self.r_min}m, "
+            f"v_max={self.v_max}m/s, "
+            f"delta_max={math.degrees(self.max_steering_angle):.1f}deg)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ConfigurationSpace
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConfigurationSpace:
+    """
+    The C-space for a car navigating a 2-D workspace.
+
+    Collision checking is done by:
+      1. Inflating the car footprint to world-frame using CarModel.footprint_at()
+      2. Testing intersection against the obstacle polygon list.
+
+    queries are made on demand.
+    """
+
+    car:       CarModel
+    x_bounds:  Tuple[float, float]        # (x_min, x_max) metres
+    y_bounds:  Tuple[float, float]        # (y_min, y_max) metres
+    obstacles: List[Polygon] = field(default_factory=list)
+
+    # Optional: pre-union all obstacles for faster batch checking.
+    # Set to True after all obstacles are added.
+    _obstacle_union: Optional[MultiPolygon | Polygon] = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self):
+        assert self.x_bounds[0] < self.x_bounds[1], "x_bounds must be (min, max)"
+        assert self.y_bounds[0] < self.y_bounds[1], "y_bounds must be (min, max)"
+
+    # ------------------------------------------------------------------
+    # Obstacle management
+    # ------------------------------------------------------------------
+
+    def add_obstacle(self, polygon: Polygon) -> None:
+        """Add a single obstacle polygon (world frame)."""
+        self.obstacles.append(polygon)
+        self._obstacle_union = None          # invalidate cache
+
+    def add_obstacles(self, polygons: List[Polygon]) -> None:
+        """Add a list of obstacle polygons."""
+        self.obstacles.extend(polygons)
+        self._obstacle_union = None
+
+    def build_obstacle_union(self) -> None:
+        """
+        Pre-compute the union of all obstacles.
+        Call this once after all obstacles are added.
+        A single intersection test against the union is faster than
+        looping over individual polygons when obstacle count is large.
+        """
+        if not self.obstacles:
+            self._obstacle_union = Polygon()   # empty
+            return
+        union = self.obstacles[0]
+        for obs in self.obstacles[1:]:
+            union = union.union(obs)
+        self._obstacle_union = union
+
+    # ------------------------------------------------------------------
+    # Bounds checking
+    # ------------------------------------------------------------------
+
+    def in_bounds(self, x: float, y: float) -> bool:
+        """Check if a POINT (rear-axle position) is within the workspace."""
+        return (
+            self.x_bounds[0] <= x <= self.x_bounds[1] and
+            self.y_bounds[0] <= y <= self.y_bounds[1]
+        )
+
+    def footprint_in_bounds(self, x: float, y: float, theta: float) -> bool:
+        """
+        Check that the ENTIRE car footprint lies within the workspace bounds.
+        Uses the footprint bounding box for a fast first-pass check.
+        """
+        fp = self.car.footprint_at(x, y, theta)
+        minx, miny, maxx, maxy = fp.bounds
+        return (
+            minx >= self.x_bounds[0] and maxx <= self.x_bounds[1] and
+            miny >= self.y_bounds[0] and maxy <= self.y_bounds[1]
+        )
+
+    # ------------------------------------------------------------------
+    # Core collision check
+    # ------------------------------------------------------------------
+
+    def in_collision(self, x: float, y: float, theta: float) -> bool:
+        """
+        Return True if the car footprint at (x, y, theta) intersects any obstacle.
+
+        Uses obstacle union if pre-built, otherwise iterates the list.
+        """
+        footprint = self.car.footprint_at(x, y, theta)
+
+        if self._obstacle_union is not None:
+            return footprint.intersects(self._obstacle_union)
+
+        for obs in self.obstacles:
+            if footprint.intersects(obs):
+                return True
+        return False
+
+    def is_free(self, x: float, y: float, theta: float) -> bool:
+        """
+        Return True if (x, y, theta) is a valid, collision-free configuration.
+
+        Checks:
+          1. Rear-axle position within workspace bounds.
+          2. Full footprint within workspace bounds.
+          3. No collision with any obstacle.
+        """
+        if not self.in_bounds(x, y):
+            return False
+        if not self.footprint_in_bounds(x, y, theta):
+            return False
+        if self.in_collision(x, y, theta):
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Path collision check (used by DubinsPlanner)
+    # ------------------------------------------------------------------
+
+    def is_path_free(
+        self,
+        poses: List[Config],
+    ) -> bool:
+        """
+        Check a sequence of interpolated poses for collisions.
+
+        poses: list of (x, y, theta) along a Dubins arc, pre-interpolated
+               at the desired step size by the DubinsPlanner.
+
+        Returns True only if ALL poses are collision-free.
+        Fails fast on first collision.
+        """
+        for x, y, theta in poses:
+            if not self.is_free(x, y, theta):
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Random sampling
+    # ------------------------------------------------------------------
+
+    def sample_free(
+        self,
+        rng: Optional[np.random.Generator] = None,
+        max_attempts: int = 1000,
+    ) -> Optional[Config]:
+        """
+        Sample a single uniformly random free configuration (x, y, theta).
+
+        theta is sampled uniformly in [0, 2*pi).
+        Returns None if max_attempts is reached (env too cluttered).
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        for _ in range(max_attempts):
+            x     = rng.uniform(self.x_bounds[0], self.x_bounds[1])
+            y     = rng.uniform(self.y_bounds[0], self.y_bounds[1])
+            theta = rng.uniform(0.0, 2.0 * math.pi)
+            if self.is_free(x, y, theta):
+                return (x, y, theta)
+
+        return None
+
+    def sample_free_batch(
+        self,
+        n: int,
+        rng: Optional[np.random.Generator] = None,
+        max_attempts: int = 100_000,
+    ) -> List[Config]:
+        """
+        Sample n free configurations.
+        Raises RuntimeError if unable to find n free configs within max_attempts.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        configs: List[Config] = []
+        attempts = 0
+
+        while len(configs) < n and attempts < max_attempts:
+            cfg = self.sample_free(rng=rng, max_attempts=1)
+            if cfg is not None:
+                configs.append(cfg)
+            attempts += 1
+
+        if len(configs) < n:
+            raise RuntimeError(
+                f"Only found {len(configs)}/{n} free configurations "
+                f"after {max_attempts} attempts. "
+                f"Environment may be too cluttered or bounds too tight."
+            )
+        return configs
+
+    # ------------------------------------------------------------------
+    # Visualisation
+    # ------------------------------------------------------------------
+
+    def plot(
+        self,
+        configs: Optional[List[Config]] = None,
+        highlight_configs: Optional[List[Config]] = None,
+        ax: Optional[plt.Axes] = None,
+        show_footprints: bool = False,
+        figsize: Tuple[float, float] = (8, 8),
+    ) -> plt.Axes:
+        """
+        Visualise the workspace, obstacles, and optionally sampled configs.
+
+        Parameters
+        ----------
+        configs           : sampled free configurations (drawn as arrows)
+        highlight_configs : configs to draw in a different colour (start/goal)
+        ax                : existing Axes to plot onto
+        show_footprints   : draw the car footprint at each config (slow for N>50)
+        figsize           : figure size if creating a new figure
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+
+        ax.set_xlim(self.x_bounds)
+        ax.set_ylim(self.y_bounds)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        ax.set_title("Configuration space — free samples")
+
+        # --- Draw obstacles ---
+        for obs in self.obstacles:
+            xs, ys = obs.exterior.xy
+            ax.fill(xs, ys, color="#E24B4A", alpha=0.5, zorder=2)
+            ax.plot(xs, ys, color="#A32D2D", linewidth=0.8, zorder=3)
+
+        # --- Draw sampled configs ---
+        if configs:
+            arrow_len = max(
+                (self.x_bounds[1] - self.x_bounds[0]) * 0.015, 1.0
+            )
+            for x, y, theta in configs:
+                dx = arrow_len * math.cos(theta)
+                dy = arrow_len * math.sin(theta)
+                ax.annotate(
+                    "", xy=(x + dx, y + dy), xytext=(x, y),
+                    arrowprops=dict(arrowstyle="->", color="#378ADD",
+                                    lw=0.6),
+                    zorder=4,
+                )
+                if show_footprints:
+                    fp = self.car.footprint_at(x, y, theta)
+                    fxs, fys = fp.exterior.xy
+                    ax.fill(fxs, fys, color="#378ADD", alpha=0.08, zorder=1)
+                    ax.plot(fxs, fys, color="#378ADD", linewidth=0.4,
+                            alpha=0.4, zorder=1)
+
+        # --- Highlight start / goal configs ---
+        if highlight_configs:
+            arrow_len = max(
+                (self.x_bounds[1] - self.x_bounds[0]) * 0.025, 2.0
+            )
+            colors = ["#1D9E75", "#EF9F27"]   # green = start, amber = goal
+            for i, (x, y, theta) in enumerate(highlight_configs):
+                color = colors[i % len(colors)]
+                dx = arrow_len * math.cos(theta)
+                dy = arrow_len * math.sin(theta)
+                ax.annotate(
+                    "", xy=(x + dx, y + dy), xytext=(x, y),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=2.0),
+                    zorder=6,
+                )
+                ax.plot(x, y, "o", color=color, markersize=6, zorder=6)
+                if show_footprints:
+                    fp = self.car.footprint_at(x, y, theta)
+                    fxs, fys = fp.exterior.xy
+                    ax.fill(fxs, fys, color=color, alpha=0.2, zorder=5)
+                    ax.plot(fxs, fys, color=color, linewidth=1.0, zorder=5)
+
+        # --- Legend ---
+        legend_handles = [
+            mpatches.Patch(color="#E24B4A", alpha=0.6, label="Obstacle"),
+        ]
+        if configs:
+            legend_handles.append(
+                mpatches.Patch(color="#378ADD", alpha=0.6, label="Free config")
+            )
+        if highlight_configs:
+            legend_handles.append(
+                mpatches.Patch(color="#1D9E75", alpha=0.8, label="Start")
+            )
+            if len(highlight_configs) > 1:
+                legend_handles.append(
+                    mpatches.Patch(color="#EF9F27", alpha=0.8, label="Goal")
+                )
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+
+        return ax
+
+
+# ---------------------------------------------------------------------------
+# Quick demo / smoke test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    # 1. Define the car
+    car = CarModel(
+        width=2.2, length=4.9, wheelbase=3.0,
+        r_min=13.0, v_max=10.0,
+    )
+    print(car)
+    print(f"  front overhang : {car.front_overhang:.2f} m")
+    print(f"  rear  overhang : {car.rear_overhang:.2f} m")
+    print(f"  max steer angle: {math.degrees(car.max_steering_angle):.2f} deg")
+
+    # 2. Build a 250x250 C-space with a few obstacles
+    cspace = ConfigurationSpace(
+        car=car,
+        x_bounds=(0.0, 250.0),
+        y_bounds=(0.0, 250.0),
+        obstacles=[],
+    )
+
+    # Add some example obstacles (world-frame polygons)
+    cspace.add_obstacles([
+        Polygon([(50, 50), (80, 50), (80, 90), (50, 90)]),
+        Polygon([(130, 100), (170, 100), (170, 140), (130, 140)]),
+        Polygon([(30, 180), (70, 180), (70, 220), (30, 220)]),
+        Polygon([(180, 30), (210, 30), (210, 70), (180, 70)]),
+        Polygon([(190, 190), (240, 190), (240, 240), (190, 240)]),
+    ])
+
+    # Pre-build union for faster collision queries
+    cspace.build_obstacle_union()
+
+    # 3. Sample 200 free configurations
+    rng = np.random.default_rng(seed=42)
+    print("\nSampling 200 free configurations...")
+    free_configs = cspace.sample_free_batch(n=200, rng=rng)
+    print(f"  Sampled {len(free_configs)} free configs")
+
+    # 4. Spot-check a known-free and known-collision config
+    free_check = cspace.is_free(125.0, 125.0, math.pi / 4)
+    coll_check = cspace.is_free(60.0, 70.0, 0.0)        # inside obstacle
+    print(f"\n  is_free(125, 125, 45deg)  = {free_check}   (expect True)")
+    print(f"  is_free(60,  70,   0deg)  = {coll_check}  (expect False)")
+
+    # 5. Visualise
+    start = (10.0, 10.0, math.radians(45))
+    goal  = (230.0, 230.0, math.radians(90))
+
+    ax = cspace.plot(
+        configs=free_configs,
+        highlight_configs=[start, goal],
+        show_footprints=False,
+    )
+    plt.tight_layout()
+    plt.savefig("cspace_demo.png", dpi=120)
+    print("\nPlot saved to cspace_demo.png")
+    plt.show()

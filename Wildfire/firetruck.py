@@ -52,7 +52,7 @@ class Firetruck():
         self._connect_nodes()
         print(f"PRM Built: {len(self.nodes)} nodes, {sum(len(v) for v in self.graph.values())//2} edges")
 
-    def _sample_points(self,samples:int = 500):    
+    def _sample_points(self,samples:int = 1000):    
         # Calculate world bounds (50 * 5 = 250)
         limit = self.map.grid_num * self.map.cell_size
         self.nodes = []
@@ -62,10 +62,11 @@ class Firetruck():
         for _ in range(samples):
             # Generate x and y COMPLETELY separately
             tx = PRM_RANDOM.uniform(5.0, limit - 5.0)
-            ty = PRM_RANDOM.uniform(5.0, limit - 5.0)            
+            ty = PRM_RANDOM.uniform(5.0, limit - 5.0)   
+            ttheta = PRM_RANDOM.randrange(0,360,15)         
 
             # Pass as a explicit 3-tuple to match your State TypeAlias
-            if self._is_point_free((tx, ty, 0.0)):    
+            if self.is_state_valid((tx, ty, ttheta)):    
                 new_node = (tx, ty)
                 self.nodes.append(new_node)
                 
@@ -73,13 +74,41 @@ class Firetruck():
                 current_index = len(self.nodes) - 1
                 self.graph[current_index] = []
 
-    def _is_point_free(self, pos):
-        # Convert world pos to grid coord for quick lookup
-        grid_x = int(pos[0] / self.map.cell_size)
-        grid_y = int(pos[1] / self.map.cell_size)
-        return (grid_x, grid_y) not in self.map.obstacle_set
+    
+    def is_state_valid(self, state: State) -> bool:
+        """The 'Master' check for boundary and collisions."""
+        # 1. Generate footprint
+        footprints = self.get_footprint(*state)
+        # 2. Boundary Check (Entire shell must be inside 0-map_size)
+        world_box = box(0.01, 0.01, self.map.grid_num*self.map.cell_size, self.map.grid_num*self.map.cell_size)
+        for footprint in footprints:
+            if not footprint.within(world_box):
+                return False
 
-    def _connect_nodes(self, k_neighbors=10, max_radius=50):
+            # 3. Obstacle Check
+            if self.full_obstacle_geometry and footprint.intersects(
+                self.full_obstacle_geometry
+            ):
+                return False
+
+        return True
+
+    def get_footprint(self, x: float, y: float, theta: float) -> Polygon:
+        """
+        Calculates the physical space the vehicle occupies at a specific state.
+
+        Args:
+            x: The X coordinate of the vehicle center.
+            y: The Y coordinate of the vehicle center.
+            theta: Heading in degrees.
+
+        Returns:
+            A Shapely Polygon representing the transformed footprint.
+        """
+        rotated = rotate(self.base_footprint, theta, origin=(0, 0))
+        return [translate(rotated, xoff=x, yoff=y)]
+    
+    def _connect_nodes(self, k_neighbors=15, max_radius=100):
         """Finds the 10 closest neighbors for every node using a K-D Tree."""
         if not self.nodes:
             return
@@ -106,6 +135,18 @@ class Firetruck():
                     if i not in self.graph[neighbor_idx]:
                         self.graph[neighbor_idx].append(i)
 
+
+    def dubins_edge_valid(q_start, q_end, r_min, obstacles, step_size=2.0):
+        path = compute_dubins_path(q_start, q_end, r_min)
+        if path is None:
+            return False
+        
+        # Discretize the path and check each pose
+        for t in np.arange(0, path.total_length, step_size):
+            pose = path.interpolate(t)  # returns (x, y, theta)
+            if in_collision(pose, obstacles):
+                return False
+        return True
     def _is_path_clear(self, start, end):
         """Collision check for the edge (straight line)."""
         line = LineString([start, end])
@@ -196,6 +237,7 @@ class Firetruck():
 
         return None # No path found through the web
 
+
     def get_nearest_node(self, pos: Tuple[float, float]) -> Optional[int]:
         """Finds the closest PRM node index with a clear line-of-sight."""
         best_idx = None
@@ -235,7 +277,7 @@ class Firetruck():
 
         # 2. Run the planner
         start_time = time.time()
-        goal = (100, 100, 0)
+        goal = (240, 240, 0)
         path = self.plan(goal)
         end_time = time.time()
         
