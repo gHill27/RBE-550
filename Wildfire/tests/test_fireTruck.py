@@ -14,7 +14,7 @@ parent_dir = os.path.dirname(current_dir)
 # Add the parent directory to sys.path so we can find Vehicles.py
 sys.path.insert(0, parent_dir)
 
-from Vehicles import Map
+from Map_Generator import Map
 from firetruck import Firetruck
 
 @pytest.fixture

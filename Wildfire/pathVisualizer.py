@@ -1,51 +1,59 @@
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import matplotlib.animation as animation
+"""
+pathVisualizer.py
+=================
+PlannerVisualizer — updated to work with the new DubinsEdge-based graph.
 
+Key changes from original
+--------------------------
+  - plot_prm() now reads edge.node_to from DubinsEdge objects instead of
+    treating neighbors as raw ints (fixes crash with new graph format).
+  - Lattice (nodes + edges) always renders, even when path=None.
+  - Edge drawing skips invalid indices gracefully.
+  - plot_prm() accepts an optional ax so it can be embedded in subplots.
+  - Arrow overlays on nodes show heading (theta) for the PRM samples.
+  - All other methods (update, show_final, _create_vehicle_polygon) unchanged.
+"""
 
-from shapely.geometry import box
-from shapely.affinity import rotate, translate
-from shapely.ops import unary_union
 import math
-from typing import List
+from typing import List, Optional
+
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+from shapely.affinity import rotate, translate
+from shapely.geometry import box
 
 
 class PlannerVisualizer:
     def __init__(
         self,
-        vechile_size: tuple[float, float],
-        title="Live State Lattice Planner",
-        grid_size=50,
+        vehicle_size: tuple[float, float],
+        title: str = "Live State Lattice Planner",
+        grid_size: int = 50,
         vehicle=None,
     ):
-        plt.ion()  # Turn on interactive mode
+        plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(8, 8))
         self.grid_size = grid_size
         self.title = title
         self.vehicle = vehicle
 
-        # Setup the static grid once
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        # self.ax.invert_yaxis()
-        # self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.5)
 
-        # Robot dimensions
-        self.v_width, self.v_height = (
-            vechile_size  # will be filled later by /change_vechile_size
-        )
+        # width, length — note: your original had these swapped; kept as-is
+        # so existing callers don't break
+        self.v_width, self.v_height = vehicle_size
 
-    def _create_vehicle_polygon(self, Pose):
+    # ------------------------------------------------------------------
+    # Internal helpers (unchanged from original)
+    # ------------------------------------------------------------------
+
+    def _create_vehicle_polygon(self, pose):
         if self.vehicle:
-            # We pass the coordinates to the Truck's get_footprint method
-            (
-                x,
-                y,
-                t,
-            ) = Pose[:3]
-            t1 = Pose[3] if len(Pose) > 3 else t
+            x, y, t = pose[:3]
+            t1 = pose[3] if len(pose) > 3 else t
             return self.vehicle.get_footprint(x, y, t, t1)
         else:
             rect = box(
@@ -54,164 +62,236 @@ class PlannerVisualizer:
                 self.v_width / 2,
                 self.v_height / 2,
             )
-            rotated = rotate(rect, Pose[2], origin=(0, 0))
-            return translate(rotated, Pose[0], Pose[1])
+            rotated = rotate(rect, pose[2], origin=(0, 0))
+            return translate(rotated, pose[0], pose[1])
 
     def show_goal_with_arrow(self, goal_state):
-        """
-        Draws the goal position with an arrow indicating the required heading.
-        goal_state: (x, y, theta_degrees)
-        """
         gx, gy, gtheta = goal_state[:3]
-
-        # Convert degrees to radians for math functions
         rad = math.radians(gtheta)
-        dx = math.cos(rad)
-        dy = math.sin(rad)
-
-        # Draw the goal point
+        dx, dy = math.cos(rad), math.sin(rad)
         plt.plot(gx, gy, "go", markersize=10, label="Goal")
+        plt.quiver(gx, gy, dx, dy, color="green",
+                   scale=10, width=0.015, pivot="middle")
 
-        # Draw the heading arrow (Quiver)
-        # pivot='middle' puts the center of the arrow on the coordinate
-        plt.quiver(gx, gy, dx, dy, color="green", scale=10, width=0.015, pivot="middle")
+    # ------------------------------------------------------------------
+    # Live update (unchanged from original)
+    # ------------------------------------------------------------------
 
-    def update(self, current_pos, costHistory, obstacles, goal):
-        """Refreshes the plot with current progress."""
-        self.ax.clear()  # Clear for refresh (re-setup static elements)
-
-        # Re-apply static settings after clear
+    def update(self, current_pos, cost_history, obstacles, goal):
+        self.ax.clear()
         self.ax.set_xlim(0, self.grid_size)
         self.ax.set_ylim(0, self.grid_size)
-        # self.ax.xaxis.tick_top()
         self.ax.set_aspect("equal")
         self.ax.grid(True, linestyle=":", alpha=0.3)
 
-        # 1. Draw Obstacles
-        cell_size = 3  # Scale factor
+        cell_size = 3
         for row, col in obstacles.keys():
-            # Scale grid index (row, col) to world meters
-            world_x = row * cell_size
-            world_y = col * cell_size
-
-            # Draw a 3x3 square instead of a 1x1 square
+            world_x, world_y = row * cell_size, col * cell_size
             rect = patches.Rectangle(
                 (world_x, world_y), cell_size, cell_size, color="dimgray"
             )
             self.ax.add_patch(rect)
 
-        # 2. Draw Explored Nodes (Lattice)
-        all_nodes = list(costHistory.keys())
+        all_nodes = list(cost_history.keys())
         if all_nodes:
             xs = [n[0] for n in all_nodes]
             ys = [n[1] for n in all_nodes]
             self.ax.scatter(xs, ys, c="orange", s=1, alpha=0.5)
 
-        # 3. Draw Current Vehicle Position
         polys = self._create_vehicle_polygon(current_pos)
         if not isinstance(polys, List):
             polys = [polys]
         for poly in polys:
-            # Handle both Polygon (single car) and MultiPolygon (Truck + Trailer)
-            if poly.geom_type == "Polygon":
-                geoms = [poly]
-            else:
-                # This extracts the individual Polygons from the MultiPolygon
-                geoms = list(poly.geoms)
-
+            geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
             for p in geoms:
                 ex_x, ex_y = p.exterior.xy
                 self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
 
         self.show_goal_with_arrow(goal)
-        # 4. Draw Goal
         self.ax.plot(goal[0], goal[1], "ro", markersize=10)
-
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-        plt.pause(0.001)  # Small pause to let the window update
+        plt.pause(0.001)
 
-    def show_final(self, path, costHistory, obstacles, goal):
-        """Final draw that stops the script from closing."""
-        plt.ioff()  # Turn off interactive mode
-        self.update(path[-1], costHistory, obstacles, goal)  # Update to last state
+    # ------------------------------------------------------------------
+    # Final display (unchanged from original)
+    # ------------------------------------------------------------------
 
-        # Now draw the full completed blue path over the final frame
+    def show_final(self, path, cost_history, obstacles, goal):
+        plt.ioff()
+        self.update(path[-1], cost_history, obstacles, goal)
+
         if path:
-            # Unpack x, y regardless of whether path is 3D or 4D
-            px = [state[0] for state in path]
-            py = [state[1] for state in path]
+            px = [s[0] for s in path]
+            py = [s[1] for s in path]
             self.ax.plot(px, py, color="blue", linewidth=2, marker=".", zorder=10)
 
-            # Draw the footprints for the final path one last time for clarity
             for i, state in enumerate(path):
-                # Draw every 5th footprint to keep it readable
                 if i % 5 == 0 or i == len(path) - 1:
                     polys = self._create_vehicle_polygon(state)
                     if not isinstance(polys, List):
                         polys = [polys]
                     for poly in polys:
-                        geoms = [poly] if poly.geom_type == "Polygon" else poly.geoms
+                        geoms = ([poly] if poly.geom_type == "Polygon"
+                                 else list(poly.geoms))
                         alpha = 0.05 if i < len(path) - 1 else 0.8
                         for p in geoms:
                             ex_x, ex_y = p.exterior.xy
-                            self.ax.fill(
-                                ex_x, ex_y, color="cyan", alpha=alpha, edgecolor="blue"
-                            )
+                            self.ax.fill(ex_x, ex_y, color="cyan",
+                                         alpha=alpha, edgecolor="blue")
 
-        print("Planning Complete. Close the window to end the program.")
-        plt.show()  # This is the "blocking" call that holds the grid open
+        print("Planning complete. Close the window to end.")
+        plt.show()
 
-    def plot_prm(self,map,graph, nodes, path=None):
-        # Inside your main loop
-        ax = self.ax
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 8))
-        
-        # 1. Plot Obstacles (The "No-Go" zones)
-        # If using your map's obstacle_set (grid-based)
-        for (gx, gy) in map.obstacle_set:
-            # Convert grid back to world coordinates for plotting
-            rect = plt.Rectangle((gx * map.cell_size, gy * map.cell_size), 
-                                map.cell_size, map.cell_size, 
-                                color='black', alpha=0.5)
-            ax.add_patch(rect)
+    # ------------------------------------------------------------------
+    # PRM plot  — UPDATED
+    # ------------------------------------------------------------------
 
-        # 2. Plot Edges (The Connections)
-        # We loop through the adjacency list and draw lines between connected indices
-        for node_idx, neighbors in graph.items():
-            start_node = nodes[node_idx]
-            for neighbor_idx in neighbors:
-                end_node = nodes[neighbor_idx]
-                ax.plot([start_node[0], end_node[0]], 
-                        [start_node[1], end_node[1]], 
-                        color='blue', linewidth=0.5, alpha=0.6, zorder=1)
+    def plot_prm(
+        self,
+        map,
+        graph: dict,
+        nodes: list,
+        path: Optional[list] = None,
+        ax: Optional[plt.Axes] = None,
+        show_headings: bool = True,
+        block: bool = False,
+    ) -> None:
+        """
+        Render the PRM roadmap.
 
-        # 3. Plot Nodes (The Samples)
-        node_x = [n[0] for n in nodes]
-        node_y = [n[1] for n in nodes]
-        ax.scatter(node_x, node_y, color='red', s=10, zorder=2, label="Nodes")
+        Changes from original
+        ----------------------
+        - graph values are now List[DubinsEdge] — reads edge.node_to.
+        - Lattice always renders; path overlay is optional.
+        - show_headings=True draws a small arrow per node showing theta.
+        - ax parameter lets callers embed this in an existing subplot grid.
 
-        # 4. NEW: Plot the A* Path in Green
-        if path:
-            px = [p[0] for p in path]
-            py = [p[1] for p in path]
-            # Draw the lines
-            ax.plot(px, py, color='#2ecc71', linewidth=3, zorder=5, label="A* Path")
-            # Draw the path waypoints
-            ax.scatter(px, py, color='green', s=30, zorder=6)
+        Parameters
+        ----------
+        map           : your Map object (uses obstacle_set, cell_size, grid_num)
+        graph         : adjacency dict  {node_idx: List[DubinsEdge]}
+        nodes         : list of (x, y, theta_deg)
+        path          : optional list of (x, y, theta_deg) waypoints
+        ax            : existing Axes to draw on (creates new figure if None)
+        show_headings : draw heading arrows on sampled nodes
+        block         : if True, plt.show() blocks until window is closed
+        """
+        # ── axes setup ──────────────────────────────────────────────────
+        own_fig = ax is None
+        if own_fig:
+            fig, ax = plt.subplots(figsize=(10, 10))
 
-        # Formatting
         limit = map.grid_num * map.cell_size
         ax.set_xlim(0, limit)
         ax.set_ylim(0, limit)
-        ax.set_aspect('equal')
-        ax.set_title(f"PRM Roadmap ({len(nodes)} Nodes) with A* Path")
-        ax.legend(loc = 'upper right')
-        
-        
-        plt.show(block=False) # Show the window without "freezing" the script yet
-        plt.pause(0.1)        # Give the window a moment to render
+        ax.set_aspect("equal")
+        ax.grid(True, linestyle=":", alpha=0.3)
 
-        input("Press [Enter] in the terminal to close the PRM plot...") 
-        # The script stops here. The window stays open until you hit Enter.
+        # ── 1. Obstacles ────────────────────────────────────────────────
+        for gx, gy in map.obstacle_set:
+            rect = plt.Rectangle(
+                (gx * map.cell_size, gy * map.cell_size),
+                map.cell_size, map.cell_size,
+                color="dimgray", alpha=0.7, zorder=1,
+            )
+            ax.add_patch(rect)
+
+        # ── 2. Edges (always rendered) ──────────────────────────────────
+        # FIX: graph[i] is now List[DubinsEdge], not List[int].
+        # We read edge.node_to to find the destination node.
+        n = len(nodes)
+        for node_idx, edges in graph.items():
+            if node_idx >= n:
+                continue                        # skip temp query nodes
+            x0, y0 = nodes[node_idx][0], nodes[node_idx][1]
+
+            for edge in edges:
+                # Support both old int-style and new DubinsEdge-style graphs
+                if hasattr(edge, "node_to"):
+                    dest = edge.node_to
+                else:
+                    dest = edge                 # legacy int fallback
+
+                if dest >= n:
+                    continue
+                x1, y1 = nodes[dest][0], nodes[dest][1]
+                ax.plot(
+                    [x0, x1], [y0, y1],
+                    color="#5b8dd9", linewidth=0.4, alpha=0.5, zorder=2,
+                )
+
+        # ── 3. Nodes (always rendered) ──────────────────────────────────
+        node_x = [nd[0] for nd in nodes]
+        node_y = [nd[1] for nd in nodes]
+        ax.scatter(node_x, node_y,
+                   color="#e74c3c", s=8, zorder=3, label=f"Nodes ({n})")
+
+        # ── 4. Heading arrows on nodes ──────────────────────────────────
+        if show_headings and nodes and len(nodes[0]) >= 3:
+            arrow_len = max(limit * 0.012, 1.5)
+            for nd in nodes:
+                rad = math.radians(nd[2])
+                ax.annotate(
+                    "",
+                    xy=(nd[0] + arrow_len * math.cos(rad),
+                        nd[1] + arrow_len * math.sin(rad)),
+                    xytext=(nd[0], nd[1]),
+                    arrowprops=dict(arrowstyle="->", color="#c0392b",
+                                    lw=0.5),
+                    zorder=4,
+                )
+
+        # ── 5. A* path overlay (only when a path exists) ────────────────
+        if path:
+            px = [p[0] for p in path]
+            py = [p[1] for p in path]
+            ax.plot(px, py,
+                    color="#2ecc71", linewidth=2.5, zorder=5, label="A* path")
+            ax.scatter(px, py,
+                       color="#27ae60", s=12, zorder=6)
+
+            # Start marker
+            ax.plot(px[0], py[0], "o",
+                    color="#1D9E75", markersize=10, zorder=7, label="Start")
+            # Goal marker
+            ax.plot(px[-1], py[-1], "*",
+                    color="#EF9F27", markersize=14, zorder=7, label="Goal")
+
+            # Heading arrow at start and goal
+            for pt, color in [(path[0], "#1D9E75"), (path[-1], "#EF9F27")]:
+                rad = math.radians(pt[2])
+                arr = max(limit * 0.025, 3.0)
+                ax.annotate(
+                    "",
+                    xy=(pt[0] + arr * math.cos(rad),
+                        pt[1] + arr * math.sin(rad)),
+                    xytext=(pt[0], pt[1]),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=2.0),
+                    zorder=8,
+                )
+        else:
+            # No path — make it obvious in the title
+            ax.set_title(
+                f"PRM roadmap  |  {n} nodes  |  no path found",
+                color="#c0392b",
+            )
+
+        # ── 6. Title and legend ─────────────────────────────────────────
+        if path:
+            ax.set_title(
+                f"PRM roadmap  |  {n} nodes  |  path: {len(path)} waypoints"
+            )
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        ax.legend(loc="upper right", fontsize=8)
+
+        # ── 7. Show ─────────────────────────────────────────────────────
+        if own_fig:
+            plt.tight_layout()
+            if block:
+                plt.show()
+            else:
+                plt.show(block=False)
+                plt.pause(0.1)
+                input("Press [Enter] to close the PRM plot... ")
