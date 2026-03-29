@@ -296,7 +296,7 @@ class Firetruck:
     # BUILD PHASE
     # ------------------------------------------------------------------
 
-    def build_tree(self, n_samples: int = 500) -> None:
+    def build_tree(self, n_samples: int = 200) -> None:
         print("Sampling free configurations...")
         self._sample_points(n_samples)
         print(f"Connecting {len(self.nodes)} nodes...")
@@ -314,7 +314,7 @@ class Firetruck:
             attempts += 1
             tx     = PRM_RANDOM.uniform(5.0, limit - 5.0)
             ty     = PRM_RANDOM.uniform(5.0, limit - 5.0)
-            ttheta = PRM_RANDOM.randrange(0, 360, 15)
+            ttheta = PRM_RANDOM.randrange(0, 360, 45)
             if self.cspace.is_free(tx, ty, ttheta):
                 idx = len(self.nodes)
                 self.nodes.append((tx, ty, ttheta))
@@ -472,9 +472,11 @@ class Firetruck:
     # ------------------------------------------------------------------
 
     def main_run(self) -> None:
+        build_time = time.time()
         self.build_tree()
         start_time = time.time()
-        goal = (40.0, 40.0, 0.0)
+        print(f"Build time: {start_time - build_time:.4f}s")
+        goal = (40.0, 40.0, 45.0)
         path = self.plan(goal)
         print(f"Query time: {time.time() - start_time:.4f}s")
         if self.viz:

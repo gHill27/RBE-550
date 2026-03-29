@@ -7,7 +7,7 @@ import time
 def main():
     wumpus_pose = (100,100,0)
     firetruck_pose = (10,10,0)
-    map = Map(Grid_num=50,cell_size=5, fill_percent=0.0,firetruck_pose=firetruck_pose,wumpus_pose=wumpus_pose)
+    map = Map(Grid_num=20,cell_size=5, fill_percent=0.1,firetruck_pose=firetruck_pose,wumpus_pose=wumpus_pose)
     # print(map.obstacle_set)
     firetruck = Firetruck(map, plot=True)
     firetruck.main_run()

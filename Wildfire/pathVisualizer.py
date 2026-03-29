@@ -201,19 +201,16 @@ class PlannerVisualizer:
         # ── 2. Edges (always rendered) ──────────────────────────────────
         # FIX: Use the actual 'path' list inside the edge dictionary 
         # to draw the Dubins curve instead of a straight line.
+        all_edge_paths = []
         for node_idx, edges in graph.items():
             for edge_info in edges:
-                edge_path = edge_info.get("path", [])
-                if not edge_path:
-                    continue
-                
-                ex = [p[0] for p in edge_path]
-                ey = [p[1] for p in edge_path]
-                
-                ax.plot(
-                    ex, ey,
-                    color="#5b8dd9", linewidth=0.6, alpha=0.4, zorder=2
-                )
+                path_pts = edge_info.get("path", [])
+                if path_pts:
+                    # Convert [(x, y, th), ...] to [(x, y), ...]
+                    all_edge_paths.append([(p[0], p[1]) for p in path_pts])
+
+        lc = LineCollection(all_edge_paths, color="#5b8dd9", linewidth=0.4, alpha=0.4, zorder=2)
+        ax.add_collection(lc)
 
         # ── 3. Nodes (always rendered) ──────────────────────────────────
         node_x = [nd[0] for nd in nodes]
