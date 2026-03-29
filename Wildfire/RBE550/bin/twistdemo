@@ -1,0 +1,6 @@
+#!/home/gavin-hill/RBE550/RBE-550/Wildfire/RBE550/bin/python3
+import sys
+from roboticstoolbox.examples.twistdemo import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

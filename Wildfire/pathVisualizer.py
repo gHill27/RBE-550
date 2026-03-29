@@ -19,6 +19,7 @@ from typing import List, Optional
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from shapely.affinity import rotate, translate
 from shapely.geometry import box
 
@@ -32,7 +33,7 @@ class PlannerVisualizer:
         vehicle=None,
     ):
         plt.ion()
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
+        self.fig, self.ax = plt.subplots(figsize=(12, 12))
         self.grid_size = grid_size
         self.title = title
         self.vehicle = vehicle
@@ -180,7 +181,7 @@ class PlannerVisualizer:
         # ── axes setup ──────────────────────────────────────────────────
         own_fig = ax is None
         if own_fig:
-            fig, ax = plt.subplots(figsize=(10, 10))
+            ax = self.ax
 
         limit = map.grid_num * map.cell_size
         ax.set_xlim(0, limit)
@@ -198,34 +199,27 @@ class PlannerVisualizer:
             ax.add_patch(rect)
 
         # ── 2. Edges (always rendered) ──────────────────────────────────
-        # FIX: graph[i] is now List[DubinsEdge], not List[int].
-        # We read edge.node_to to find the destination node.
-        n = len(nodes)
+        # FIX: Use the actual 'path' list inside the edge dictionary 
+        # to draw the Dubins curve instead of a straight line.
         for node_idx, edges in graph.items():
-            if node_idx >= n:
-                continue                        # skip temp query nodes
-            x0, y0 = nodes[node_idx][0], nodes[node_idx][1]
-
-            for edge in edges:
-                # Support both old int-style and new DubinsEdge-style graphs
-                if hasattr(edge, "node_to"):
-                    dest = edge.node_to
-                else:
-                    dest = edge                 # legacy int fallback
-
-                if dest >= n:
+            for edge_info in edges:
+                edge_path = edge_info.get("path", [])
+                if not edge_path:
                     continue
-                x1, y1 = nodes[dest][0], nodes[dest][1]
+                
+                ex = [p[0] for p in edge_path]
+                ey = [p[1] for p in edge_path]
+                
                 ax.plot(
-                    [x0, x1], [y0, y1],
-                    color="#5b8dd9", linewidth=0.4, alpha=0.5, zorder=2,
+                    ex, ey,
+                    color="#5b8dd9", linewidth=0.6, alpha=0.4, zorder=2
                 )
 
         # ── 3. Nodes (always rendered) ──────────────────────────────────
         node_x = [nd[0] for nd in nodes]
         node_y = [nd[1] for nd in nodes]
         ax.scatter(node_x, node_y,
-                   color="#e74c3c", s=8, zorder=3, label=f"Nodes ({n})")
+                   color="#e74c3c", s=8, zorder=3, label=f"Nodes ({len(nodes)})")
 
         # ── 4. Heading arrows on nodes ──────────────────────────────────
         if show_headings and nodes and len(nodes[0]) >= 3:
@@ -273,14 +267,14 @@ class PlannerVisualizer:
         else:
             # No path — make it obvious in the title
             ax.set_title(
-                f"PRM roadmap  |  {n} nodes  |  no path found",
+                f"PRM roadmap  |  {len(nodes)} nodes  |  no path found",
                 color="#c0392b",
             )
 
         # ── 6. Title and legend ─────────────────────────────────────────
         if path:
             ax.set_title(
-                f"PRM roadmap  |  {n} nodes  |  path: {len(path)} waypoints"
+                f"PRM roadmap  |  {len(nodes)} nodes  |  path: {len(path)} waypoints"
             )
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
