@@ -26,7 +26,7 @@ RESET = "\033[0m"
 
 class Map:
 
-    def __init__(self, Grid_num, cell_size, fill_percent: float, firetruck_pose: Optional[tuple[float]] = None, wumpus_pose:Optional[tuple[float]] = None):
+    def __init__(self, Grid_num, cell_size, fill_percent: float, wumpus, firetruck, firetruck_pose: Optional[tuple[float]] = None, wumpus_pose:Optional[tuple[float]] = None):
         # each cell is 5 meters by 5 meters in real distance
         self.grid_num = Grid_num
         self.cell_size = cell_size
@@ -42,6 +42,9 @@ class Map:
         # add firetruck location and wumpus location for generate safe map
         self.firetruck_pose = firetruck_pose
         self.wumpus_pose = wumpus_pose
+        self.firetruck = firetruck
+        self.wumpus = wumpus
+
         try:
             self.generate_safe_map(firetruck_pose,wumpus_pose,buffer_radius=6)
         except Exception:
@@ -54,6 +57,16 @@ class Map:
         self.check_time_events()
         if self.sim_time > 3600:
             return "Done"
+        
+        wumpus_path = self.wumpus.plan()
+        firetruck_path = self.firetruck.plan()
+
+        #need to refine logic for this here 
+
+            
+
+
+
 
     def update_sim_time(self):
         self.sim_time += 0.1
