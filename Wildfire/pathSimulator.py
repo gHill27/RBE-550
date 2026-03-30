@@ -1,404 +1,447 @@
 """
-pathSimulator.py
-================
-PathSimulator — updated to work with the new PRM/Dubins planner output.
+simulation_engine.py
+====================
+SimulationEngine — the single entry point for the Wildfire simulation.
 
-Key changes from original
---------------------------
-  - World size derived from map.grid_num * map.cell_size (no hardcoded 36).
-  - Obstacles drawn from map.obstacle_set instead of obstacle_coordinate_dict.
-  - Accepts 3-tuple waypoints (x, y, theta_deg) from Dubins path output.
-  - Multi-goal support: run_multi_goal() plans and simulates sequential goals.
-  - Environment-only preview: show_environment() renders map with no path.
-  - _interpolate() now smooths between Dubins waypoints (already dense),
-    so it just linearly fills at the desired fps rather than assuming sparse nodes.
-  - Heading interpolation uses shortest-angle arithmetic to avoid 359→1 flipping.
+Responsibilities
+----------------
+  - Owns Map, Firetruck, and Wumpus construction in the right order,
+    resolving the circular dependency (agents need map, map needs agents).
+  - Drives the per-tick loop: clock advance → fire spread → goal selection
+    → replanning → pose updates → visualizer redraw.
+  - Exposes clean hooks so each agent stays focused on its own logic:
+      Firetruck  → path planning (PRM + Dubins)
+      Wumpus     → path planning (A*)
+      Map        → world state (obstacles, fire, time)
+      Visualizer → display only
+  - Handles replan throttling so the PRM isn't hammered every 0.1 s tick.
+  - Provides a simple run() call to start the full simulation.
+
+Usage
+-----
+    from simulation_engine import SimulationEngine
+
+    engine = SimulationEngine(
+        grid_num        = 50,
+        cell_size       = 5.0,
+        fill_percent    = 0.15,
+        firetruck_start = (25.0, 25.0, 0.0),   # world metres (x, y, theta°)
+        wumpus_start    = (220.0, 220.0),        # world metres (x, y)
+        prm_nodes       = 500,
+        replan_interval = 5.0,   # seconds of sim time between replans
+        tick_real_time  = 0.05,  # wall-clock seconds per tick (display speed)
+        plot            = True,
+    )
+    engine.run()
 """
 
 from __future__ import annotations
 
-import math
+import time
 from typing import List, Optional, Tuple
 
-import matplotlib.animation as animation
-import matplotlib.patches as patches
-import matplotlib.pyplot as plt
+from Map_Generator import Map, Status
+from firetruck import Firetruck
+from wumpus import Wumpus
+from pathVisualizer import SimVisualizer
+
+# Type alias kept consistent with firetruck_prm.py
+State = Tuple[float, float, float]
 
 
-# Type alias matching your State convention
-State = Tuple[float, float, float]   # (x, y, theta_deg)
+class SimulationEngine:
+    """
+    Orchestrates Map, Firetruck, Wumpus, and SimVisualizer for one
+    complete simulation run.
 
+    Parameters
+    ----------
+    grid_num : int
+        Number of grid cells per side.
+    cell_size : float
+        Metres per grid cell.
+    fill_percent : float
+        Fraction of grid cells occupied by obstacles (0.0–1.0).
+    firetruck_start : tuple (x_m, y_m, theta_deg)
+        Initial firetruck pose in world metres.
+    wumpus_start : tuple (x_m, y_m)
+        Initial wumpus position in world metres.
+    prm_nodes : int
+        Number of nodes to sample when building the PRM roadmap.
+        More nodes → better paths, slower build.
+    replan_interval : float
+        Minimum simulated seconds between full replanning calls.
+        Replanning is triggered immediately whenever the active goal
+        changes (new fire, fire extinguished, wumpus becomes the goal).
+    tick_real_time : float
+        Wall-clock seconds to sleep between sim ticks.
+        0.0 = run as fast as possible.
+    plot : bool
+        Whether to open the matplotlib display window.
+    sim_duration : float
+        Maximum simulated seconds before the engine stops (default 3600).
+    """
 
-class PathSimulator:
     def __init__(
         self,
-        vehicle,                        # your Firetruck instance
-        fps: int = 30,
+        grid_num:        int   = 50,
+        cell_size:       float = 5.0,
+        fill_percent:    float = 0.05,
+        firetruck_start: State = (25.0, 25.0, 0.0),
+        wumpus_start:    Tuple[float, float] = (220.0, 220.0),
+        prm_nodes:       int   = 500,
+        replan_interval: float = 5.0,
+        tick_real_time:  float = 0.05,
+        plot:            bool  = True,
+        sim_duration:    float = 3600.0,
     ):
-        self.vehicle = vehicle
-        self.fps     = fps
+        self.replan_interval = replan_interval
+        self.tick_real_time  = tick_real_time
+        self.sim_duration    = sim_duration
+        self.plot            = plot
 
-        # Derive world size from the map attached to the vehicle
-        self._world_size = (
-            vehicle.map.grid_num * vehicle.map.cell_size
+        # Internal state
+        self._firetruck_path: Optional[List[State]] = None
+        self._wumpus_path:    Optional[List]        = None
+        self._last_replan_time: float               = -replan_interval  # force immediate replan
+        self._last_goal:        Optional[State]     = None              # detect goal changes
+
+        # ------------------------------------------------------------------
+        # Step 1 — Build Map WITHOUT agents (they don't exist yet)
+        # ------------------------------------------------------------------
+        print("[Engine] Building map...")
+        self.map = Map(
+            Grid_num       = grid_num,
+            cell_size      = cell_size,
+            fill_percent   = fill_percent,
+            wumpus         = None,          # patched in step 3
+            firetruck      = None,          # patched in step 3
+            firetruck_pose = firetruck_start,
+            wumpus_pose    = (wumpus_start[0], wumpus_start[1]),
         )
-        self._cell_size = vehicle.map.cell_size
 
-        self.fig: Optional[plt.Figure] = None
-        self.ax:  Optional[plt.Axes]   = None
-        self.ani: Optional[animation.FuncAnimation] = None
+        # ------------------------------------------------------------------
+        # Step 2 — Build agents (they read map at construction time)
+        # ------------------------------------------------------------------
+        print("[Engine] Initialising agents...")
+        self.firetruck = Firetruck(self.map, plot=False)
+        self.wumpus    = Wumpus(self.map)
+
+        # ------------------------------------------------------------------
+        # Step 3 — Patch agents back into the map (resolves circular dep)
+        # ------------------------------------------------------------------
+        self.map.firetruck = self.firetruck
+        self.map.wumpus    = self.wumpus
+
+        # ------------------------------------------------------------------
+        # Step 4 — Build PRM roadmap (one-time, slow operation)
+        # ------------------------------------------------------------------
+        print(f"[Engine] Building PRM roadmap ({prm_nodes} nodes)...")
+        self.firetruck.build_tree(n_samples=prm_nodes)
+        print("[Engine] Roadmap ready.")
+
+        # ------------------------------------------------------------------
+        # Step 5 — Visualizer (needs map fully configured)
+        # ------------------------------------------------------------------
+        self.viz: Optional[SimVisualizer] = None
+        if plot:
+            print("[Engine] Opening display window...")
+            self.viz = SimVisualizer(self.map, figsize=(16, 11))
+
+        print("[Engine] Initialisation complete. Ready to run.")
 
     # =======================================================================
     # Public API
     # =======================================================================
 
-    def show_environment(
-        self,
-        goals: Optional[List[State]] = None,
-        title: str = "Environment",
-    ) -> None:
+    def run(self) -> None:
         """
-        Render the map and optional goal markers with no path or lattice.
-        Useful for sanity-checking obstacle layout before planning.
-
-        Parameters
-        ----------
-        goals : list of (x, y, theta_deg) goal poses to mark on the map
-        title : window title
+        Start the simulation loop and block until it finishes.
+        The loop runs until sim_time exceeds sim_duration or Map.main()
+        signals completion.
         """
-        fig, ax = plt.subplots(figsize=(8, 8))
-        self._setup_axes(ax, title)
-        self._draw_obstacles(ax)
+        print(f"[Engine] Simulation starting (duration={self.sim_duration}s)...")
 
-        if goals:
-            colors = ["#1D9E75", "#EF9F27", "#534AB7", "#D85A30"]
-            for i, g in enumerate(goals):
-                color = colors[i % len(colors)]
-                ax.plot(g[0], g[1], "o", color=color,
-                        markersize=10, zorder=5, label=f"Goal {i+1}")
-                self._draw_heading_arrow(ax, g, length=self._world_size * 0.03,
-                                         color=color, lw=2.0)
+        # Seed the first goal before the first tick
+        self._refresh_goal()
 
-        if goals:
-            ax.legend(loc="upper right", fontsize=8)
+        while self.map.sim_time <= self.sim_duration:
+            self._tick()
 
-        plt.tight_layout()
-        plt.show()
+        print(f"[Engine] Simulation ended at t={self.map.sim_time:.1f}s")
+        self._shutdown()
 
-    def run(
-        self,
-        path: List[State],
-        title: str = "Vehicle simulation",
-        trail_color: str = "#2ecc71",
-    ) -> None:
+    def step(self) -> bool:
         """
-        Animate the vehicle following a single planned path.
+        Advance the simulation by exactly one tick.
+        Returns False when the simulation should stop, True otherwise.
+        Useful for external loops or testing.
 
-        Parameters
-        ----------
-        path        : list of (x, y, theta_deg) from Firetruck.plan()
-        title       : window title
-        trail_color : colour of the ghost trail line
+        The duration check happens AFTER the tick so that the post-tick
+        sim_time (updated inside map.main()) is the value tested.
+        Checking before the tick would use the pre-tick time, causing
+        step() to return True one tick past the deadline.
         """
-        if not path:
-            print("PathSimulator.run(): empty path, nothing to animate.")
+        if self.map.sim_time > self.sim_duration:
+            return False
+        self._tick()
+        # Re-check after the tick — map.main() advanced sim_time inside
+        return self.map.sim_time <= self.sim_duration
+
+    # =======================================================================
+    # Core tick
+    # =======================================================================
+
+    def _tick(self) -> None:
+        """One simulation step — called every 0.1 s of sim time."""
+
+        # 1. Advance sim clock and run Map-level events (fire spread, burn-out)
+        #    map.main() calls wumpus.plan() and firetruck.plan() internally.
+        #    We guard the return value so a "Done" signal exits cleanly.
+        result = self.map.main()
+        if result == "Done":
+            # Force sim_time past sim_duration so run() and step() both stop
+            self.map.sim_time = self.sim_duration + 1.0
             return
 
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
-        self._setup_axes(self.ax, title)
-        self._draw_obstacles(self.ax)
+        # 2. Decide whether to replan
+        time_since_replan = self.map.sim_time - self._last_replan_time
+        goal_changed      = self._goal_has_changed()
 
-        # Ghost trail of the planned path
-        px = [p[0] for p in path]
-        py = [p[1] for p in path]
-        self.ax.plot(px, py, "--", color=trail_color,
-                     alpha=0.4, linewidth=1.0, label="Planned path")
+        if goal_changed or time_since_replan >= self.replan_interval:
+            self._refresh_goal()
+            self._replan()
+            self._last_replan_time = self.map.sim_time
 
-        # Goal marker
-        goal = path[-1]
-        self.ax.plot(goal[0], goal[1], "*",
-                     color="#EF9F27", markersize=14, zorder=6, label="Goal")
-        self._draw_heading_arrow(self.ax, goal,
-                                  length=self._world_size * 0.03,
-                                  color="#EF9F27", lw=2.0)
+        # 3. Advance agent positions along their current paths
+        self._advance_firetruck()
+        self._advance_wumpus()
 
-        # Dense simulation path
-        sim_path = self._interpolate(path)
+        # 4. Let the wumpus act on the world (burn nearby obstacles)
+        self._wumpus_act()
 
-        # Initial vehicle patch
-        vehicle_patch = self._make_vehicle_patch(sim_path[0])
-        for p in vehicle_patch:
-            self.ax.add_patch(p)
+        # 5. Redraw
+        if self.viz:
+            self.viz.update(self._firetruck_path, self._wumpus_path)
 
-        # Trace line (grows as vehicle moves)
-        trace_x, trace_y = [sim_path[0][0]], [sim_path[0][1]]
-        (trace_line,) = self.ax.plot(
-            trace_x, trace_y,
-            color=trail_color, linewidth=1.5, zorder=4,
+        # 6. Pace wall-clock time
+        if self.tick_real_time > 0:
+            time.sleep(self.tick_real_time)
+
+    # =======================================================================
+    # Goal management
+    # =======================================================================
+
+    @staticmethod
+    def _normalize_goal(goal):
+        """
+        Guarantee the goal is always a 3-tuple (x, y, theta_deg).
+
+        find_firetruck_goal() can return:
+          - (x, y, theta)  heading toward a fire        <- already correct
+          - (x, y)         falling back to wumpus_pose  <- missing theta
+          - "ERROR CANT GO HERE"                        <- invalid, discard
+          - None                                        <- nothing to do
+
+        2-tuples get theta=0.0 appended so the Dubins planner always
+        receives a valid State and never raises IndexError on goal[2].
+        """
+        if not goal or goal == "ERROR CANT GO HERE":
+            return None
+        if len(goal) == 2:
+            return (float(goal[0]), float(goal[1]), 0.0)
+        return (float(goal[0]), float(goal[1]), float(goal[2]))
+
+    def _refresh_goal(self) -> None:
+        """
+        Ask the map for the best current goal and update map.firetruck_goal.
+        Always normalises the raw return value to a 3-tuple before storing.
+        """
+        goal = self._normalize_goal(self.map.find_firetruck_goal())
+        if goal:
+            self.map.update_goal(goal)
+
+    def _goal_has_changed(self) -> bool:
+        """
+        Return True if the current goal differs meaningfully from the last
+        planned goal.  Triggers an immediate replan when a new fire starts
+        or is extinguished.
+        """
+        current = self.map.firetruck_goal
+        if current is None and self._last_goal is None:
+            return False
+        if current is None or self._last_goal is None:
+            return True
+        # Compare x, y positions (ignore heading for change detection)
+        return (
+            abs(current[0] - self._last_goal[0]) > 1.0 or
+            abs(current[1] - self._last_goal[1]) > 1.0
         )
 
-        self.ax.legend(loc="upper right", fontsize=8)
+    # =======================================================================
+    # Replanning
+    # =======================================================================
 
-        def update(frame: int):
-            state = sim_path[frame]
-            new_patches = self._make_vehicle_patch(state)
-            for patch, new_p in zip(vehicle_patch, new_patches):
-                patch.set_xy(list(new_p.get_xy()))
-
-            trace_x.append(state[0])
-            trace_y.append(state[1])
-            trace_line.set_data(trace_x, trace_y)
-            return vehicle_patch + [trace_line]
-
-        self.ani = animation.FuncAnimation(
-            self.fig, update,
-            frames=len(sim_path),
-            interval=1000 // self.fps,
-            blit=True,
-        )
-        plt.tight_layout()
-        plt.show()
-
-    def run_multi_goal(
-        self,
-        goals: List[State],
-        colors: Optional[List[str]] = None,
-        title: str = "Multi-goal simulation",
-    ) -> None:
+    def _replan(self) -> None:
         """
-        Plan and animate sequential legs from the truck's current pose
-        through each goal in order.
-
-        The truck's pose is updated after each leg so the next leg starts
-        from where the previous one ended.
-
-        Parameters
-        ----------
-        goals  : ordered list of (x, y, theta_deg) goal poses
-        colors : per-leg trail colors (cycles if fewer than len(goals))
-        title  : window title
+        Recompute both the firetruck and wumpus paths using their
+        respective planners.  Stores results internally; the visualizer
+        reads them on the next update() call.
         """
-        if not goals:
-            print("run_multi_goal(): no goals provided.")
+        self._replan_firetruck()
+        self._replan_wumpus()
+        self._last_goal = self.map.firetruck_goal
+
+    def _replan_firetruck(self) -> None:
+        # Normalize defensively — goal may have been set externally as a 2-tuple
+        goal = self._normalize_goal(self.map.firetruck_goal)
+        if goal is None:
             return
 
-        default_colors = ["#2ecc71", "#3498db", "#9b59b6", "#e67e22", "#e74c3c"]
-        if colors is None:
-            colors = default_colors
+        pose = self.map.firetruck_pose
+        start: State = (float(pose[0]), float(pose[1]), float(pose[2]))
 
-        # ── Plan all legs first ─────────────────────────────────────────
-        legs: List[List[State]] = []
-        for i, goal in enumerate(goals):
-            print(f"Planning leg {i+1}/{len(goals)}: → {goal}")
-            path = self.vehicle.plan(goal)
-            if path is None:
-                print(f"  No path found for leg {i+1}. Stopping.")
-                break
-            legs.append(path)
-            # Update truck pose so next leg starts from here
-            self.vehicle.map.firetruck_pose = (goal[0], goal[1])
-
-        if not legs:
-            print("No legs could be planned.")
-            return
-
-        # ── Set up a single figure ──────────────────────────────────────
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
-        self._setup_axes(self.ax, title)
-        self._draw_obstacles(self.ax)
-
-        # Draw all planned trails and goal markers up front
-        for i, (leg, goal) in enumerate(zip(legs, goals)):
-            color = colors[i % len(colors)]
-            px = [p[0] for p in leg]
-            py = [p[1] for p in leg]
-            self.ax.plot(px, py, "--", color=color,
-                         alpha=0.3, linewidth=1.0)
-            self.ax.plot(goal[0], goal[1], "*",
-                         color=color, markersize=12, zorder=6,
-                         label=f"Goal {i+1}")
-            self._draw_heading_arrow(
-                self.ax, goal,
-                length=self._world_size * 0.025,
-                color=color, lw=1.5,
+        path = self.firetruck.plan(goal_state=goal, start_state=start)
+        if path:
+            self._firetruck_path = path
+        else:
+            # Keep the old path rather than showing nothing
+            print(
+                f"[Engine] Firetruck replan failed at t={self.map.sim_time:.1f}s "
+                f"(start={start}, goal={goal})"
             )
 
-        self.ax.legend(loc="upper right", fontsize=8)
+    def _replan_wumpus(self) -> None:
+        path = self.wumpus.plan()
+        if path is not None:
+            self._wumpus_path = path
 
-        # ── Build one concatenated dense path ───────────────────────────
-        full_sim: List[State] = []
-        leg_boundaries: List[int] = []   # frame indices where legs start
+    # =======================================================================
+    # Agent advancement
+    # =======================================================================
 
-        for leg in legs:
-            dense = self._interpolate(leg)
-            leg_boundaries.append(len(full_sim))
-            full_sim.extend(dense)
-
-        if not full_sim:
+    def _advance_firetruck(self) -> None:
+        """
+        Move the firetruck one step along its current path.
+        Each tick represents 0.1 s of sim time; we move one waypoint
+        per tick (the path is dense at ~0.5–1.0 m spacing from Dubins).
+        """
+        if not self._firetruck_path or len(self._firetruck_path) < 2:
             return
 
-        # ── Initial vehicle patch ───────────────────────────────────────
-        vehicle_patch = self._make_vehicle_patch(full_sim[0])
-        for p in vehicle_patch:
-            self.ax.add_patch(p)
+        # Pop the first waypoint — the truck is now at the second
+        self._firetruck_path.pop(0)
+        next_pose = self._firetruck_path[0]
+        self.map.firetruck_pose = next_pose
 
-        # One trace line per leg, drawn progressively
-        trace_lines = []
-        for i, leg in enumerate(legs):
-            color = colors[i % len(colors)]
-            (line,) = self.ax.plot([], [], color=color, linewidth=1.5, zorder=4)
-            trace_lines.append(line)
+        # Check if the truck has reached the goal (within one cell)
+        goal = self.map.firetruck_goal
+        if goal:
+            dist = (
+                (next_pose[0] - goal[0]) ** 2 +
+                (next_pose[1] - goal[1]) ** 2
+            ) ** 0.5
+            if dist < self.map.cell_size:
+                self._on_firetruck_reached_goal()
 
-        # Frame → leg index lookup
-        def leg_of(frame: int) -> int:
-            idx = 0
-            for b in leg_boundaries:
-                if frame >= b:
-                    idx = leg_boundaries.index(b)
-            return idx
+    def _advance_wumpus(self) -> None:
+        """
+        Move the wumpus one grid step along its current path.
+        Wumpus path is in grid (row, col) tuples.
+        """
+        if not self._wumpus_path or len(self._wumpus_path) < 2:
+            return
 
-        trace_data: List[Tuple[List[float], List[float]]] = [
-            ([], []) for _ in legs
+        self._wumpus_path.pop(0)
+        next_cell = self._wumpus_path[0]
+
+        # Convert grid cell to world-metre centre
+        cs = self.map.cell_size
+        wx = next_cell[0] * cs + cs / 2.0
+        wy = next_cell[1] * cs + cs / 2.0
+        self.map.wumpus_pose = (wx, wy)
+
+    # =======================================================================
+    # Agent actions
+    # =======================================================================
+
+    def _on_firetruck_reached_goal(self) -> None:
+        """
+        Called when the firetruck arrives within stop_distance of its goal.
+        Scans nearby grid cells for any BURNING obstacle and extinguishes it.
+
+        We search a small radius around the goal rather than converting the
+        goal exactly to one cell, because the goal is intentionally placed
+        stop_distance metres short of the fire — the fire cell itself is
+        adjacent, not directly under the goal point.
+        """
+        goal = self.map.firetruck_goal
+        if goal is None:
+            return
+
+        cs       = self.map.cell_size
+        gx, gy   = goal[0], goal[1]
+
+        # Check the goal cell and its 8 neighbours for a burning obstacle
+        goal_cell = (int(gx / cs), int(gy / cs))
+        candidates = [
+            goal_cell,
+            (goal_cell[0] + 1, goal_cell[1]),
+            (goal_cell[0] - 1, goal_cell[1]),
+            (goal_cell[0],     goal_cell[1] + 1),
+            (goal_cell[0],     goal_cell[1] - 1),
+            (goal_cell[0] + 1, goal_cell[1] + 1),
+            (goal_cell[0] - 1, goal_cell[1] - 1),
+            (goal_cell[0] + 1, goal_cell[1] - 1),
+            (goal_cell[0] - 1, goal_cell[1] + 1),
         ]
 
-        def update(frame: int):
-            state   = full_sim[frame]
-            leg_idx = leg_of(frame)
+        extinguished_any = False
+        for cell in candidates:
+            if cell in self.map.obstacle_coordinate_dict:
+                status = self.map.obstacle_coordinate_dict[cell]["status"]
+                if status == Status.BURNING:
+                    print(
+                        f"[Engine] Firetruck extinguishing {cell} "
+                        f"at t={self.map.sim_time:.1f}s"
+                    )
+                    self.map.set_status_on_obstacles([cell], Status.EXTINGUISHED)
+                    extinguished_any = True
 
-            # Update vehicle footprint
-            new_patches = self._make_vehicle_patch(state)
-            for patch, new_p in zip(vehicle_patch, new_patches):
-                patch.set_xy(list(new_p.get_xy()))
+        if extinguished_any:
+            print(f"[Engine] Fire suppressed near goal {goal_cell}")
 
-            # Grow current leg's trace
-            trace_data[leg_idx][0].append(state[0])
-            trace_data[leg_idx][1].append(state[1])
-            trace_lines[leg_idx].set_data(*trace_data[leg_idx])
+        # Goal is consumed — clear it so _goal_has_changed triggers a replan
+        self.map.firetruck_goal = None
 
-            return vehicle_patch + trace_lines
-
-        self.ani = animation.FuncAnimation(
-            self.fig, update,
-            frames=len(full_sim),
-            interval=1000 // self.fps,
-            blit=True,
-        )
-        plt.tight_layout()
-        plt.show()
+    def _wumpus_act(self) -> None:
+        """
+        Let the wumpus burn adjacent obstacles each tick.
+        Delegates to Wumpus.burn() which sets nearby cells to BURNING.
+        """
+        try:
+            self.wumpus.burn()
+        except Exception as e:
+            # burn() may fail if wumpus is in an edge cell — log and continue
+            print(f"[Engine] Wumpus burn() error: {e}")
 
     # =======================================================================
-    # Internal helpers
+    # Shutdown
     # =======================================================================
 
-    def _setup_axes(self, ax: plt.Axes, title: str) -> None:
-        ax.set_xlim(0, self._world_size)
-        ax.set_ylim(0, self._world_size)
-        ax.set_aspect("equal")
-        ax.grid(True, linestyle=":", alpha=0.3)
-        ax.set_title(title)
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
+    def _shutdown(self) -> None:
+        """Print final stats and keep the display open."""
+        counts = {"INTACT": 0, "BURNING": 0, "EXTINGUISHED": 0, "BURNED": 0}
+        for data in self.map.obstacle_coordinate_dict.values():
+            counts[data["status"].name] += 1
 
-    def _draw_obstacles(self, ax: plt.Axes) -> None:
-        """
-        Draw obstacles from map.obstacle_set.
-        FIX: original used obstacle_coordinate_dict which doesn't exist on Map.
-        """
-        for row, col in self.vehicle.map.obstacle_set:
-            world_x = row * self._cell_size
-            world_y = col * self._cell_size
-            rect = patches.Rectangle(
-                (world_x, world_y),
-                self._cell_size, self._cell_size,
-                color="dimgray", alpha=0.8, zorder=2,
-            )
-            ax.add_patch(rect)
+        print("\n[Engine] ── Final Statistics ──────────────────")
+        print(f"  Sim time       : {self.map.sim_time:.1f}s")
+        print(f"  Intact cells   : {counts['INTACT']}")
+        print(f"  Burned cells   : {counts['BURNED']}")
+        print(f"  Extinguished   : {counts['EXTINGUISHED']}")
+        print(f"  Still burning  : {counts['BURNING']}")
+        print("────────────────────────────────────────────────\n")
 
-    def _draw_heading_arrow(
-        self,
-        ax: plt.Axes,
-        state: State,
-        length: float,
-        color: str,
-        lw: float = 1.5,
-    ) -> None:
-        rad = math.radians(state[2])
-        ax.annotate(
-            "",
-            xy=(state[0] + length * math.cos(rad),
-                state[1] + length * math.sin(rad)),
-            xytext=(state[0], state[1]),
-            arrowprops=dict(arrowstyle="->", color=color, lw=lw),
-            zorder=7,
-        )
-
-    def _interpolate(self, path: List[State]) -> List[State]:
-        """
-        The Dubins path from plan() is already dense (0.5m waypoints).
-        This method linearly fills between consecutive waypoints at the
-        fps rate so the animation runs at a consistent speed.
-
-        FIX from original:
-          - No hardcoded velocity assumption; step size from fps.
-          - Heading interpolation uses shortest-angle arithmetic
-            (fixes 359° → 1° flip that caused the truck to spin).
-          - Works with 3-tuple (x, y, theta) — no trailer logic needed here.
-        """
-        if len(path) < 2:
-            return list(path)
-
-        dt          = 1.0 / self.fps
-        speed       = self.vehicle.car.v_max          # m/s from CarModel
-        step_dist   = speed * dt
-        smooth: List[State] = []
-
-        for i in range(len(path) - 1):
-            p1, p2 = path[i], path[i + 1]
-            dist   = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-            steps  = max(1, int(dist / step_dist))
-
-            for s in range(steps):
-                ratio = s / steps
-                ix    = p1[0] + (p2[0] - p1[0]) * ratio
-                iy    = p1[1] + (p2[1] - p1[1]) * ratio
-
-                # Shortest-angle heading interpolation
-                diff  = (p2[2] - p1[2] + 180.0) % 360.0 - 180.0
-                itheta = (p1[2] + diff * ratio) % 360.0
-
-                smooth.append((ix, iy, itheta))
-
-        smooth.append(path[-1])
-        return smooth
-
-    def _make_vehicle_patch(
-        self, state: State
-    ) -> List[patches.Polygon]:
-        """
-        Build matplotlib Polygon patches for the vehicle footprint.
-        Calls car.footprint_at() from CarModel — returns a single Shapely Polygon.
-        """
-        car      = self.vehicle.car
-        footprint = car.footprint_at(state[0], state[1], state[2])
-
-        # footprint_at returns a single Shapely Polygon
-        geoms = (
-            [footprint]
-            if footprint.geom_type == "Polygon"
-            else list(footprint.geoms)
-        )
-
-        result = []
-        colors     = ["cyan", "yellow"]
-        edgecolors = ["blue", "orange"]
-        for i, geom in enumerate(geoms):
-            p = patches.Polygon(
-                list(geom.exterior.coords),
-                facecolor=colors[i % len(colors)],
-                edgecolor=edgecolors[i % len(edgecolors)],
-                alpha=0.9,
-                zorder=10,
-            )
-            result.append(p)
-
-        return result
+        if self.viz:
+            self.viz.close()

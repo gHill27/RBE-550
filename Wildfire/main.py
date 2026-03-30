@@ -1,18 +1,26 @@
-from Map_Generator import Map, Status
-from wumpus import Wumpus
-from firetruck import Firetruck
-import time
+"""
+run_sim.py
+==========
+Entry point for the Wildfire simulation.
+All configuration lives here — everything else is handled by SimulationEngine.
 
+Run with:
+    python run_sim.py
+"""
 
-def main():
-    wumpus_pose = (100,100,0)
-    firetruck_pose = (10,10,0)
-    map = Map(Grid_num=20,cell_size=5, fill_percent=0.1,firetruck_pose=firetruck_pose,wumpus_pose=wumpus_pose)
-    # print(map.obstacle_set)
-    firetruck = Firetruck(map, plot=True)
-    firetruck.main_run()
-    wumpus = Wumpus()
+from pathSimulator import SimulationEngine
 
+engine = SimulationEngine(
+    grid_num        = 50,           # grid cells per side
+    cell_size       = 5.0,          # metres per cell
+    fill_percent    = 0.05,         # fraction of cells that are obstacles
+    firetruck_start = (25.0, 25.0, 0.0),   # (x_m, y_m, theta_deg)
+    wumpus_start    = (220.0, 220.0),       # (x_m, y_m)
+    prm_nodes       = 500,          # PRM roadmap size
+    replan_interval = 5.0,          # sim-seconds between replans
+    tick_real_time  = 0.05,         # wall-clock seconds per tick
+    plot            = True,
+    sim_duration    = 3600.0,       # 1 hour of sim time
+)
 
-if __name__ == "__main__":
-    main()
+engine.run()

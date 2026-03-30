@@ -27,7 +27,6 @@ from shapely.ops import unary_union
 
 from Map_Generator import Map
 from pathVisualizer import PlannerVisualizer
-from pathSimulator import PathSimulator
 
 # ---------------------------------------------------------------------------
 # Type aliases

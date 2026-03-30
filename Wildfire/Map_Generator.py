@@ -58,10 +58,10 @@ class Map:
         if self.sim_time > 3600:
             return "Done"
         
-        wumpus_path = self.wumpus.plan()
-        firetruck_path = self.firetruck.plan()
+        # wumpus_path = self.wumpus.plan()
+        # firetruck_path = self.firetruck.plan()
 
-        #need to refine logic for this here 
+        #need to refine logic for this here
 
             
 
@@ -88,17 +88,29 @@ class Map:
             print("Already has burn time!")
 
     def check_time_events(self):
-        for coordinate, dictionary in self.obstacle_coordinate_dict.items():
-            burn_time = dictionary["burn_time"]
-            if burn_time:
-                if self.sim_time - burn_time > 30:
-                    self.set_status_on_obstacles(coordinate, Status.BURNED)
-                    print(f'obstacle at coordinate {coordinate} has burned!')
-                    self._delete_obstacle(coordinate)
+        """
+        Called every tick. Advances fire state based on elapsed burn time.
+        """
 
-                elif self.sim_time - burn_time > 10:
-                    nearby_obstacles = self.find_burnable_obstacles()
+        for coordinate, dictionary in list(self.obstacle_coordinate_dict.items()):
+            burn_time = dictionary["burn_time"]
+            if burn_time is None:
+                continue
+    
+            elapsed = self.sim_time - burn_time
+    
+            if elapsed > 30:
+                # Cell has burned out completely
+                print(f"Obstacle at {coordinate} has burned out at t={self.sim_time:.1f}s")
+                self.set_status_on_obstacles([coordinate], Status.BURNED)  # FIX: wrap in list
+                # self._delete_obstacle(coordinate)
+    
+            elif elapsed > 10:
+                # Fire has been burning long enough to spread to neighbours
+                nearby_obstacles = self.find_burnable_obstacles(coordinate)  # FIX: pass coordinate
+                if nearby_obstacles:
                     self.set_status_on_obstacles(nearby_obstacles, Status.BURNING)
+    
 
     def find_burnable_obstacles(self, coordinate, radius_cells=6):
         center_x, center_y = coordinate
@@ -117,8 +129,10 @@ class Map:
 
     def set_status_on_obstacles(
         self, coordinates: list[tuple[float, float]], status: Status
-    ):
+    ):  
         # obstacles_to_change_status = self.find_neighbor_obstacles(coordinate=coordinate)
+        if isinstance(coordinates,tuple):
+            coordinates = [coordinates]
         for coord in coordinates:
             currStatus = self.obstacle_coordinate_dict[coord]["status"]
             if currStatus == status:
@@ -145,43 +159,64 @@ class Map:
         self.firetruck_goal = goal
 
     def find_firetruck_goal(self):
-        #finds the nearest burning obstacle and goes to extinguish it. 
-        #if no obstacles are on fire, use the wumpus location
+        """
+        Returns the goal pose (x_m, y_m, theta_deg) for the firetruck.
+    
+        Priority:
+        1. Nearest BURNING obstacle (stop 7m short so truck parks beside it)
+        2. Wumpus position (no active fires — go intercept the wumpus)
+    
+        FIX: convert grid cell (row, col) → world metres using cell_size.
+        Original code used raw grid indices as metres, producing goals that
+        were ~cell_size times too close to the origin.
+        """
         if len(self.active_fires) == 0:
             try:
-                return self.wumpus_pose #no fires go get the wumpus!!
+                wp = self.wumpus_pose
+                # wumpus_pose is stored in world metres already
+                return (float(wp[0]), float(wp[1]))
             except Exception as e:
-                print(f"{RED}Cannot get Wumpus and firetruck data! Error {e} {RESET}")
-                return (100.0,100.0,0)
-        else: 
-            fx,fy,ftheta = self.firetruck_pose
-            closest_dist = math.inf
-            for coordinate_pair in self.active_fires:
-                #basic beginner logic just go to closest one
-                distance = math.dist((fx,fy),coordinate_pair)
-                if distance < closest_dist:
-                    closest_dist = distance
-                    closest_coord = coordinate_pair
-                
-            #shorten vector such that the truck stops 1 cell short such that it doesn't crash
-            target_x, target_y =  closest_coord
-            dx = target_x - fx
-            dy = target_y - fy
-            distance = math.sqrt(dx**2 + dy**2)
-            angle_to_fire = math.degrees(math.atan2(dy, dx)) % 360
-            stop_distance = 7.0 
-            if distance <= stop_distance:
-                # We are already close enough! Just stay here and face the fire.
-                return (fx, fy, angle_to_fire)
-            
-            # Ratio of how far to travel vs total distance
-            ratio = (distance - stop_distance) / distance
-            
-            goal_x = fx + (dx * ratio)
-            goal_y = fy + (dy * ratio)
-            if (round(goal_x),round(goal_y)) in self.obstacle_set: return 'ERROR CANT GO HERE'
-            # Return the snapped goal for the A* planner
-            return (goal_x, goal_y, angle_to_fire)
+                print(f"Cannot get Wumpus pose! Error {e}")
+                return (100.0, 100.0, 0.0)
+    
+        fx, fy, ftheta = self.firetruck_pose
+        closest_dist = float('inf')
+        closest_coord = None
+    
+        for coordinate_pair in self.active_fires:
+            # FIX: convert grid cell centre to world metres
+            fire_world_x = coordinate_pair[0] * self.cell_size + self.cell_size / 2.0
+            fire_world_y = coordinate_pair[1] * self.cell_size + self.cell_size / 2.0
+            distance = math.dist((fx, fy), (fire_world_x, fire_world_y))
+            if distance < closest_dist:
+                closest_dist = distance
+                closest_coord = coordinate_pair
+    
+        # Convert the chosen cell to world metres
+        target_x = closest_coord[0] * self.cell_size + self.cell_size / 2.0
+        target_y = closest_coord[1] * self.cell_size + self.cell_size / 2.0
+    
+        dx = target_x - fx
+        dy = target_y - fy
+        distance = math.sqrt(dx ** 2 + dy ** 2)
+        angle_to_fire = math.degrees(math.atan2(dy, dx)) % 360
+        stop_distance = self.cell_size * 1.5   # park 1.5 cells short of the fire
+    
+        if distance <= stop_distance:
+            # Already close enough — face the fire and stay put
+            return (fx, fy, angle_to_fire)
+    
+        ratio = (distance - stop_distance) / distance
+        goal_x = fx + dx * ratio
+        goal_y = fy + dy * ratio
+    
+        # Safety: reject goal if it lands inside an obstacle cell
+        goal_cell = (int(goal_x / self.cell_size), int(goal_y / self.cell_size))
+        if goal_cell in self.obstacle_set:
+            return 'ERROR CANT GO HERE'
+    
+        return (goal_x, goal_y, angle_to_fire)
+    
         
     def generate_safe_map(self, start_pos, wumpus_pos, buffer_radius=6.0):
         """

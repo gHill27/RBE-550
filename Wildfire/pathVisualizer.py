@@ -1,288 +1,627 @@
 """
 pathVisualizer.py
 =================
-PlannerVisualizer — updated to work with the new DubinsEdge-based graph.
+Real-time matplotlib display for the Wildfire simulation.
 
-Key changes from original
---------------------------
-  - plot_prm() now reads edge.node_to from DubinsEdge objects instead of
-    treating neighbors as raw ints (fixes crash with new graph format).
-  - Lattice (nodes + edges) always renders, even when path=None.
-  - Edge drawing skips invalid indices gracefully.
-  - plot_prm() accepts an optional ax so it can be embedded in subplots.
-  - Arrow overlays on nodes show heading (theta) for the PRM samples.
-  - All other methods (update, show_final, _create_vehicle_polygon) unchanged.
+Consumed data (all read directly from the Map object each frame):
+  map.obstacle_coordinate_dict  – {(row,col): {'status': Status, ...}}
+  map.sim_time                  – float, seconds
+  map.firetruck_pose            – (x_m, y_m, theta_deg)   world-metres
+  map.wumpus_pose               – (x_m, y_m)              world-metres
+  map.cell_size                 – metres per grid cell
+  map.grid_num                  - number of cells per side
+
+Paths are passed in per-frame:
+  firetruck_path  - list of (x_m, y_m, theta_deg) States, or None
+  wumpus_path     - list of (row, col) grid tuples, or None
+
+Usage
+-----
+    from pathVisualizer import SimVisualizer
+
+    viz = SimVisualizer(map_obj)          # create once
+    viz.update(firetruck_path, wumpus_path)   # call every sim tick
+    # At end:
+    viz.close()
+
+Call viz.update() as fast as your sim loop runs; matplotlib's
+non-blocking draw (pause(0.001)) keeps the window responsive.
 """
 
+from __future__ import annotations
+
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-import matplotlib.patches as patches
+import matplotlib
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
-from shapely.affinity import rotate, translate
-from shapely.geometry import box
+import matplotlib.transforms as transforms
+import numpy as np
+from matplotlib.patches import FancyArrowPatch, Polygon, RegularPolygon
+from matplotlib.lines import Line2D
+
+# Use a non-blocking backend that works both in scripts and notebooks.
+matplotlib.use("TkAgg")   # swap to "Qt5Agg" if TkAgg is unavailable
+
+# ---------------------------------------------------------------------------
+# Colour palette
+# ---------------------------------------------------------------------------
+_C = {
+    "bg":           "#0d0d0f",          # near-black canvas
+    "grid_line":    "#1e2030",          # subtle grid
+    "empty_cell":   "#12151e",          # open ground
+    "intact":       "#2d5a1b",          # dark forest green
+    "burning":      "#e05c00",          # deep orange
+    "extinguished": "#3a6b8a",          # slate blue
+    "burned":       "#1a1a1a",          # charcoal
+    "truck_body":   "#d4a843",          # amber
+    "truck_cabin":  "#f0c040",          # bright gold
+    "truck_outline":"#ffffff",
+    "wumpus":       "#e8003d",          # vivid red
+    "wumpus_path":  "#ff6b6b",
+    "truck_path":   "#43d4c8",          # cyan-teal
+    "goal_marker":  "#ff3cac",          # hot pink
+    "text_primary": "#e8eaf0",
+    "text_dim":     "#6b7280",
+    "panel_bg":     "#0a0c12",
+    "hud_border":   "#2a2d3e",
+}
+
+_STATUS_COLOR = {
+    "INTACT":       _C["intact"],
+    "BURNING":      _C["burning"],
+    "EXTINGUISHED": _C["extinguished"],
+    "BURNED":       _C["burned"],
+}
+
+# Physical truck dimensions (metres) — must match CarModel in firetruck_prm.py
+_TRUCK_LENGTH   = 4.9
+_TRUCK_WIDTH    = 2.2
+_TRUCK_WHEELBASE = 3.0
+_TRUCK_REAR_OVERHANG = (_TRUCK_LENGTH - _TRUCK_WHEELBASE) / 2.0
+
+# Wumpus star size in metres
+_WUMPUS_RADIUS = 2.5
 
 
-class PlannerVisualizer:
-    def __init__(
-        self,
-        vehicle_size: tuple[float, float],
-        title: str = "Live State Lattice Planner",
-        grid_size: int = 50,
-        vehicle=None,
-    ):
+# ===========================================================================
+# SimVisualizer
+# ===========================================================================
+
+class SimVisualizer:
+    """
+    Persistent matplotlib figure that redraws on every call to update().
+
+    Parameters
+    ----------
+    map_obj : Map
+        Live reference to the Map instance.  The visualizer reads its
+        fields directly — nothing is copied at construction time.
+    figsize : tuple
+        Figure size in inches (width, height).
+    """
+
+    def __init__(self, map_obj, figsize: Tuple[int, int] = (14, 10)):
+        self.map = map_obj
+
+        cs  = map_obj.cell_size
+        gn  = map_obj.grid_num
+        self._world = gn * cs          # world size in metres
+        self._cs    = cs
+        self._gn    = gn
+
+        # --- Figure layout: main map + right-side HUD panel ---------------
+        self._fig = plt.figure(
+            figsize=figsize,
+            facecolor=_C["bg"],
+            linewidth=0,
+        )
+        self._fig.canvas.manager.set_window_title("Wildfire Simulation")
+
+        # GridSpec: map takes 80% width, HUD panel 20%
+        gs = self._fig.add_gridspec(
+            1, 2,
+            width_ratios=[4, 1],
+            left=0.02, right=0.98,
+            top=0.97, bottom=0.03,
+            wspace=0.04,
+        )
+        self._ax  = self._fig.add_subplot(gs[0])    # main map
+        self._hud = self._fig.add_subplot(gs[1])    # info panel
+
+        self._setup_axes()
+
+        # --- Reusable artists (updated in-place each frame) ---------------
+        # Obstacle patches stored in a dict keyed by (row,col)
+        self._obstacle_patches: dict = {}
+
+        # Path lines
+        self._truck_path_line, = self._ax.plot(
+            [], [], color=_C["truck_path"], lw=1.4,
+            alpha=0.75, zorder=4, linestyle="--",
+        )
+        self._wumpus_path_line, = self._ax.plot(
+            [], [], color=_C["wumpus_path"], lw=1.4,
+            alpha=0.75, zorder=4, linestyle=":",
+        )
+
+        # Goal marker (crosshair)
+        self._goal_scatter = self._ax.scatter(
+            [], [], marker="X", s=180,
+            color=_C["goal_marker"], zorder=8, linewidths=1.5,
+            edgecolors=_C["bg"],
+        )
+
+        # Truck body (rotated rectangle drawn as a Polygon)
+        self._truck_patch = mpatches.FancyBboxPatch(
+            (0, 0), 1, 1,
+            boxstyle="round,pad=0.05",
+            facecolor=_C["truck_body"],
+            edgecolor=_C["truck_outline"],
+            linewidth=1.2,
+            zorder=7,
+        )
+        self._ax.add_patch(self._truck_patch)
+
+        # Heading arrow on truck
+        self._truck_arrow = FancyArrowPatch(
+            (0, 0), (1, 0),
+            arrowstyle="-|>",
+            color=_C["truck_outline"],
+            mutation_scale=10,
+            linewidth=1.2,
+            zorder=8,
+        )
+        self._ax.add_patch(self._truck_arrow)
+
+        # Wumpus star
+        self._wumpus_star = RegularPolygon(
+            (0, 0), numVertices=5,
+            radius=_WUMPUS_RADIUS,
+            orientation=math.pi / 2,
+            facecolor=_C["wumpus"],
+            edgecolor="#ffffff",
+            linewidth=0.8,
+            zorder=7,
+        )
+        self._ax.add_patch(self._wumpus_star)
+
+        # Legend
+        self._build_legend()
+
         plt.ion()
-        self.fig, self.ax = plt.subplots(figsize=(12, 12))
-        self.grid_size = grid_size
-        self.title = title
-        self.vehicle = vehicle
-
-        self.ax.set_xlim(0, self.grid_size)
-        self.ax.set_ylim(0, self.grid_size)
-        self.ax.set_aspect("equal")
-        self.ax.grid(True, linestyle=":", alpha=0.5)
-
-        # width, length — note: your original had these swapped; kept as-is
-        # so existing callers don't break
-        self.v_width, self.v_height = vehicle_size
-
-    # ------------------------------------------------------------------
-    # Internal helpers (unchanged from original)
-    # ------------------------------------------------------------------
-
-    def _create_vehicle_polygon(self, pose):
-        if self.vehicle:
-            x, y, t = pose[:3]
-            t1 = pose[3] if len(pose) > 3 else t
-            return self.vehicle.get_footprint(x, y, t, t1)
-        else:
-            rect = box(
-                -self.v_width / 2,
-                -self.v_height / 2,
-                self.v_width / 2,
-                self.v_height / 2,
-            )
-            rotated = rotate(rect, pose[2], origin=(0, 0))
-            return translate(rotated, pose[0], pose[1])
-
-    def show_goal_with_arrow(self, goal_state):
-        gx, gy, gtheta = goal_state[:3]
-        rad = math.radians(gtheta)
-        dx, dy = math.cos(rad), math.sin(rad)
-        plt.plot(gx, gy, "go", markersize=10, label="Goal")
-        plt.quiver(gx, gy, dx, dy, color="green",
-                   scale=10, width=0.015, pivot="middle")
-
-    # ------------------------------------------------------------------
-    # Live update (unchanged from original)
-    # ------------------------------------------------------------------
-
-    def update(self, current_pos, cost_history, obstacles, goal):
-        self.ax.clear()
-        self.ax.set_xlim(0, self.grid_size)
-        self.ax.set_ylim(0, self.grid_size)
-        self.ax.set_aspect("equal")
-        self.ax.grid(True, linestyle=":", alpha=0.3)
-
-        cell_size = 3
-        for row, col in obstacles.keys():
-            world_x, world_y = row * cell_size, col * cell_size
-            rect = patches.Rectangle(
-                (world_x, world_y), cell_size, cell_size, color="dimgray"
-            )
-            self.ax.add_patch(rect)
-
-        all_nodes = list(cost_history.keys())
-        if all_nodes:
-            xs = [n[0] for n in all_nodes]
-            ys = [n[1] for n in all_nodes]
-            self.ax.scatter(xs, ys, c="orange", s=1, alpha=0.5)
-
-        polys = self._create_vehicle_polygon(current_pos)
-        if not isinstance(polys, List):
-            polys = [polys]
-        for poly in polys:
-            geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
-            for p in geoms:
-                ex_x, ex_y = p.exterior.xy
-                self.ax.fill(ex_x, ex_y, color="cyan", alpha=0.8, edgecolor="blue")
-
-        self.show_goal_with_arrow(goal)
-        self.ax.plot(goal[0], goal[1], "ro", markersize=10)
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
+        self._fig.canvas.draw()
         plt.pause(0.001)
 
     # ------------------------------------------------------------------
-    # Final display (unchanged from original)
+    # Axis setup
     # ------------------------------------------------------------------
 
-    def show_final(self, path, cost_history, obstacles, goal):
-        plt.ioff()
-        self.update(path[-1], cost_history, obstacles, goal)
+    def _setup_axes(self):
+        ax = self._ax
+        ax.set_facecolor(_C["empty_cell"])
+        ax.set_xlim(0, self._world)
+        ax.set_ylim(0, self._world)
+        ax.set_aspect("equal")
+        ax.tick_params(colors=_C["text_dim"], labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(_C["hud_border"])
 
-        if path:
-            px = [s[0] for s in path]
-            py = [s[1] for s in path]
-            self.ax.plot(px, py, color="blue", linewidth=2, marker=".", zorder=10)
+        # Draw grid lines once
+        for i in range(self._gn + 1):
+            v = i * self._cs
+            ax.axhline(v, color=_C["grid_line"], lw=0.4, zorder=0)
+            ax.axvline(v, color=_C["grid_line"], lw=0.4, zorder=0)
 
-            for i, state in enumerate(path):
-                if i % 5 == 0 or i == len(path) - 1:
-                    polys = self._create_vehicle_polygon(state)
-                    if not isinstance(polys, List):
-                        polys = [polys]
-                    for poly in polys:
-                        geoms = ([poly] if poly.geom_type == "Polygon"
-                                 else list(poly.geoms))
-                        alpha = 0.05 if i < len(path) - 1 else 0.8
-                        for p in geoms:
-                            ex_x, ex_y = p.exterior.xy
-                            self.ax.fill(ex_x, ex_y, color="cyan",
-                                         alpha=alpha, edgecolor="blue")
+        ax.set_xlabel("X  (metres)", color=_C["text_dim"], fontsize=8)
+        ax.set_ylabel("Y  (metres)", color=_C["text_dim"], fontsize=8)
 
-        print("Planning complete. Close the window to end.")
-        plt.show()
+        # HUD panel
+        hud = self._hud
+        hud.set_facecolor(_C["panel_bg"])
+        hud.set_xticks([])
+        hud.set_yticks([])
+        for spine in hud.spines.values():
+            spine.set_edgecolor(_C["hud_border"])
+
+    def _build_legend(self):
+        legend_items = [
+            mpatches.Patch(facecolor=_C["intact"],       label="Intact"),
+            mpatches.Patch(facecolor=_C["burning"],      label="Burning"),
+            mpatches.Patch(facecolor=_C["extinguished"], label="Extinguished"),
+            mpatches.Patch(facecolor=_C["burned"],       label="Burned"),
+            Line2D([0], [0], color=_C["truck_path"],  lw=1.5, ls="--", label="Truck path"),
+            Line2D([0], [0], color=_C["wumpus_path"], lw=1.5, ls=":",  label="Wumpus path"),
+            mpatches.Patch(facecolor=_C["goal_marker"],  label="Goal"),
+        ]
+        self._ax.legend(
+            handles=legend_items,
+            loc="upper left",
+            fontsize=7,
+            framealpha=0.6,
+            facecolor=_C["panel_bg"],
+            edgecolor=_C["hud_border"],
+            labelcolor=_C["text_primary"],
+        )
 
     # ------------------------------------------------------------------
-    # PRM plot  — UPDATED
+    # Public API
     # ------------------------------------------------------------------
 
-    def plot_prm(
+    def update(
         self,
-        map,
-        graph: dict,
-        nodes: list,
-        path: Optional[list] = None,
-        ax: Optional[plt.Axes] = None,
-        show_headings: bool = True,
-        block: bool = False,
+        firetruck_path: Optional[List[Tuple]] = None,
+        wumpus_path:    Optional[List[Tuple]] = None,
     ) -> None:
         """
-        Render the PRM roadmap.
-
-        Changes from original
-        ----------------------
-        - graph values are now List[DubinsEdge] — reads edge.node_to.
-        - Lattice always renders; path overlay is optional.
-        - show_headings=True draws a small arrow per node showing theta.
-        - ax parameter lets callers embed this in an existing subplot grid.
+        Redraw the entire scene.  Call once per simulation tick.
 
         Parameters
         ----------
-        map           : your Map object (uses obstacle_set, cell_size, grid_num)
-        graph         : adjacency dict  {node_idx: List[DubinsEdge]}
-        nodes         : list of (x, y, theta_deg)
-        path          : optional list of (x, y, theta_deg) waypoints
-        ax            : existing Axes to draw on (creates new figure if None)
-        show_headings : draw heading arrows on sampled nodes
-        block         : if True, plt.show() blocks until window is closed
+        firetruck_path : list of (x_m, y_m, theta_deg) or None
+        wumpus_path    : list of (row, col) grid tuples or None
         """
-        # ── axes setup ──────────────────────────────────────────────────
-        own_fig = ax is None
-        if own_fig:
-            ax = self.ax
+        self._draw_obstacles()
+        self._draw_truck_path(firetruck_path)
+        self._draw_wumpus_path(wumpus_path)
+        self._draw_truck()
+        self._draw_wumpus()
+        self._draw_goal()
+        self._draw_hud()
 
-        limit = map.grid_num * map.cell_size
-        ax.set_xlim(0, limit)
-        ax.set_ylim(0, limit)
-        ax.set_aspect("equal")
-        ax.grid(True, linestyle=":", alpha=0.3)
+        self._fig.canvas.draw_idle()
+        plt.pause(0.001)
 
-        # ── 1. Obstacles ────────────────────────────────────────────────
-        for gx, gy in map.obstacle_set:
-            rect = plt.Rectangle(
-                (gx * map.cell_size, gy * map.cell_size),
-                map.cell_size, map.cell_size,
-                color="dimgray", alpha=0.7, zorder=1,
-            )
-            ax.add_patch(rect)
+    def close(self):
+        plt.ioff()
+        plt.show()   # keep window open when sim ends
 
-        # ── 2. Edges (always rendered) ──────────────────────────────────
-        # FIX: Use the actual 'path' list inside the edge dictionary 
-        # to draw the Dubins curve instead of a straight line.
-        all_edge_paths = []
-        for node_idx, edges in graph.items():
-            for edge_info in edges:
-                path_pts = edge_info.get("path", [])
-                if path_pts:
-                    # Convert [(x, y, th), ...] to [(x, y), ...]
-                    all_edge_paths.append([(p[0], p[1]) for p in path_pts])
+    # ------------------------------------------------------------------
+    # Drawing helpers
+    # ------------------------------------------------------------------
 
-        lc = LineCollection(all_edge_paths, color="#5b8dd9", linewidth=0.4, alpha=0.4, zorder=2)
-        ax.add_collection(lc)
+    def _draw_obstacles(self):
+        """
+        Sync obstacle patches with map.obstacle_coordinate_dict.
 
-        # ── 3. Nodes (always rendered) ──────────────────────────────────
-        node_x = [nd[0] for nd in nodes]
-        node_y = [nd[1] for nd in nodes]
-        ax.scatter(node_x, node_y,
-                   color="#e74c3c", s=8, zorder=3, label=f"Nodes ({len(nodes)})")
+        Burned cells now remain in obstacle_coordinate_dict permanently
+        (Map._delete_obstacle no longer removes them) so they stay
+        visible as charcoal patches for the full simulation.
 
-        # ── 4. Heading arrows on nodes ──────────────────────────────────
-        if show_headings and nodes and len(nodes[0]) >= 3:
-            arrow_len = max(limit * 0.012, 1.5)
-            for nd in nodes:
-                rad = math.radians(nd[2])
-                ax.annotate(
-                    "",
-                    xy=(nd[0] + arrow_len * math.cos(rad),
-                        nd[1] + arrow_len * math.sin(rad)),
-                    xytext=(nd[0], nd[1]),
-                    arrowprops=dict(arrowstyle="->", color="#c0392b",
-                                    lw=0.5),
-                    zorder=4,
+        Only patches whose coords have been fully removed from the dict
+        (which should not happen in normal operation) are cleaned up.
+        """
+        ax = self._ax
+        cs = self._cs
+        current_coords = set(self.map.obstacle_coordinate_dict.keys())
+        cached_coords  = set(self._obstacle_patches.keys())
+
+        # Clean up any patches whose coord was removed from the dict
+        # (defensive — under the fixed Map this should never trigger)
+        for coord in cached_coords - current_coords:
+            self._obstacle_patches[coord].remove()
+            del self._obstacle_patches[coord]
+
+        # Add new or update existing patches
+        for coord, data in self.map.obstacle_coordinate_dict.items():
+            status_name = data["status"].name   # "INTACT","BURNING","EXTINGUISHED","BURNED"
+            color       = _STATUS_COLOR.get(status_name, _C["intact"])
+            row, col    = coord
+            x0 = row * cs
+            y0 = col * cs
+
+            if coord not in self._obstacle_patches:
+                patch = mpatches.Rectangle(
+                    (x0, y0), cs, cs,
+                    facecolor=color,
+                    edgecolor=_C["grid_line"],
+                    linewidth=0.4,
+                    zorder=2,
                 )
+                ax.add_patch(patch)
+                self._obstacle_patches[coord] = patch
 
-        # ── 5. A* path overlay (only when a path exists) ────────────────
+                if status_name == "BURNING":
+                    self._add_fire_glow(ax, x0, y0, cs)
+            else:
+                patch = self._obstacle_patches[coord]
+                patch.set_facecolor(color)
+
+                if status_name == "BURNING":
+                    # Pulse alpha for drama — faster pulse as fire intensifies
+                    elapsed = (self.map.sim_time
+                               - (data.get("burn_time") or self.map.sim_time))
+                    rate  = 3.0 + min(elapsed * 0.2, 5.0)
+                    pulse = 0.55 + 0.35 * math.sin(self.map.sim_time * rate)
+                    patch.set_alpha(pulse)
+                elif status_name == "BURNED":
+                    # Charcoal with slight transparency so the grid shows through
+                    patch.set_alpha(0.75)
+                else:
+                    patch.set_alpha(1.0)
+
+    def _add_fire_glow(self, ax, x0, y0, cs):
+        """One-time halo patch drawn behind a burning cell."""
+        pad = cs * 0.25
+        glow = mpatches.Rectangle(
+            (x0 - pad, y0 - pad),
+            cs + 2 * pad, cs + 2 * pad,
+            facecolor="#ff6600",
+            edgecolor="none",
+            alpha=0.18,
+            zorder=1,
+        )
+        ax.add_patch(glow)
+
+    def _draw_truck_path(self, path):
+        if not path:
+            self._truck_path_line.set_data([], [])
+            return
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        self._truck_path_line.set_data(xs, ys)
+
+    def _draw_wumpus_path(self, path):
+        if not path:
+            self._wumpus_path_line.set_data([], [])
+            return
+        cs = self._cs
+        # Wumpus path is in grid (row,col); convert to world centre coords
+        xs = [p[0] * cs + cs / 2 for p in path]
+        ys = [p[1] * cs + cs / 2 for p in path]
+        self._wumpus_path_line.set_data(xs, ys)
+
+    def _draw_truck(self):
+        """
+        Draw the firetruck as a rotated rectangle with a heading arrow.
+        The reference point is the rear axle centre (firetruck_prm convention).
+        """
+        pose = self.map.firetruck_pose
+        if pose is None:
+            return
+
+        x, y, theta_deg = float(pose[0]), float(pose[1]), float(pose[2])
+        theta_rad = math.radians(theta_deg)
+
+        # Remove old truck patch and re-add as a proper rotated polygon
+        # Build footprint corners in local frame (rear axle = origin)
+        hl = _TRUCK_WHEELBASE + _TRUCK_REAR_OVERHANG   # total forward extent
+        hr = _TRUCK_REAR_OVERHANG                        # rear extent
+        hw = _TRUCK_WIDTH / 2.0
+
+        corners_local = np.array([
+            [-hr,  -hw],
+            [-hr,   hw],
+            [ hl,   hw],
+            [ hl,  -hw],
+        ])
+
+        # Rotate and translate
+        c, s = math.cos(theta_rad), math.sin(theta_rad)
+        R = np.array([[c, -s], [s, c]])
+        corners_world = (R @ corners_local.T).T + np.array([x, y])
+
+        # Update the truck patch as a polygon
+        self._truck_patch.set_visible(False)   # hide the placeholder box
+        if hasattr(self, "_truck_poly"):
+            self._truck_poly.set_xy(corners_world)
+            self._truck_poly.set_visible(True)
+        else:
+            self._truck_poly = plt.Polygon(
+                corners_world,
+                closed=True,
+                facecolor=_C["truck_body"],
+                edgecolor=_C["truck_outline"],
+                linewidth=1.4,
+                zorder=7,
+            )
+            self._ax.add_patch(self._truck_poly)
+
+        # Heading arrow: rear axle → front axle
+        nose_x = x + (hl) * c
+        nose_y = y + (hl) * s
+        self._truck_arrow.set_positions((x, y), (nose_x, nose_y))
+
+        # Cabin highlight (front quarter of the truck, brighter colour)
+        cabin_depth = _TRUCK_WIDTH * 0.6
+        cabin_local = np.array([
+            [hl - cabin_depth, -hw],
+            [hl - cabin_depth,  hw],
+            [hl,                hw],
+            [hl,               -hw],
+        ])
+        cabin_world = (R @ cabin_local.T).T + np.array([x, y])
+        if hasattr(self, "_truck_cabin"):
+            self._truck_cabin.set_xy(cabin_world)
+        else:
+            self._truck_cabin = plt.Polygon(
+                cabin_world,
+                closed=True,
+                facecolor=_C["truck_cabin"],
+                edgecolor="none",
+                alpha=0.7,
+                zorder=8,
+            )
+            self._ax.add_patch(self._truck_cabin)
+
+    def _draw_wumpus(self):
+        """
+        Draw the wumpus as a 5-pointed red star at wumpus_pose.
+        wumpus_pose is stored in world metres on the Map.
+        """
+        pose = self.map.wumpus_pose
+        if pose is None:
+            return
+        wx, wy = float(pose[0]), float(pose[1])
+        self._wumpus_star.xy = (wx, wy)
+
+    def _draw_goal(self):
+        """
+        Draw the current firetruck goal (from map.firetruck_goal) as a
+        hot-pink ✕ marker.
+        """
+        goal = self.map.firetruck_goal
+        if goal is None:
+            self._goal_scatter.set_offsets(np.empty((0, 2)))
+            return
+        gx, gy = float(goal[0]), float(goal[1])
+        self._goal_scatter.set_offsets([[gx, gy]])
+
+    def _draw_hud(self):
+        """Right-side panel: sim clock + live statistics."""
+        hud = self._hud
+        hud.cla()
+        hud.set_facecolor(_C["panel_bg"])
+        hud.set_xticks([])
+        hud.set_yticks([])
+        for spine in hud.spines.values():
+            spine.set_edgecolor(_C["hud_border"])
+
+        t = self.map.sim_time
+        mins  = int(t) // 60
+        secs  = int(t) % 60
+        msecs = int((t % 1) * 10)
+
+        # Count obstacle statuses
+        counts = {"INTACT": 0, "BURNING": 0, "EXTINGUISHED": 0, "BURNED": 0}
+        for data in self.map.obstacle_coordinate_dict.values():
+            counts[data["status"].name] += 1
+
+        # Active fires
+        n_fires = len(self.map.active_fires)
+
+        lines = [
+            ("SIM TIME",         f"{mins:02d}:{secs:02d}.{msecs}", "#e8eaf0", 14, "bold"),
+            ("",                 "",                                 "#444",    8,  "normal"),
+            ("OBSTACLES",        "",                                 _C["text_dim"], 8, "bold"),
+            ("  Intact",         str(counts["INTACT"]),             _C["intact"],   9, "normal"),
+            ("  Burning",        str(counts["BURNING"]),            _C["burning"],  9, "normal"),
+            ("  Extinguished",   str(counts["EXTINGUISHED"]),       _C["extinguished"], 9, "normal"),
+            ("  Burned",         str(counts["BURNED"]),             _C["burned"] if counts["BURNED"] == 0 else "#666", 9, "normal"),
+            ("",                 "",                                 "#444",    8,  "normal"),
+            ("ACTIVE FIRES",     str(n_fires),                      "#e05c00" if n_fires > 0 else _C["text_dim"], 10, "bold"),
+        ]
+
+        # Add goal info
+        goal = self.map.firetruck_goal
+        if goal:
+            lines += [
+                ("",              "",                                 "#444", 8, "normal"),
+                ("TRUCK GOAL",    f"({goal[0]:.1f}, {goal[1]:.1f})", _C["goal_marker"], 8, "normal"),
+            ]
+
+        y_pos = 0.97
+        for label, value, color, size, weight in lines:
+            if label == "":
+                y_pos -= 0.025
+                continue
+            # Label on left
+            hud.text(
+                0.05, y_pos, label,
+                transform=hud.transAxes,
+                color=_C["text_dim"],
+                fontsize=size - 1,
+                fontweight=weight,
+                va="top",
+            )
+            # Value on right (if present)
+            if value:
+                hud.text(
+                    0.95, y_pos, value,
+                    transform=hud.transAxes,
+                    color=color,
+                    fontsize=size,
+                    fontweight=weight,
+                    va="top",
+                    ha="right",
+                )
+            y_pos -= 0.065
+
+        # Truck pose at bottom
+        pose = self.map.firetruck_pose
+        if pose:
+            hud.text(
+                0.5, 0.08,
+                f"Truck\n({pose[0]:.1f}, {pose[1]:.1f})\n{pose[2]:.1f}°",
+                transform=hud.transAxes,
+                color=_C["truck_body"],
+                fontsize=7.5,
+                ha="center", va="bottom",
+            )
+
+        wp = self.map.wumpus_pose
+        if wp:
+            hud.text(
+                0.5, 0.02,
+                f"Wumpus  ({wp[0]:.1f}, {wp[1]:.1f})",
+                transform=hud.transAxes,
+                color=_C["wumpus"],
+                fontsize=7,
+                ha="center", va="bottom",
+            )
+
+
+# ===========================================================================
+# PlannerVisualizer  (kept for compatibility with firetruck_prm.py)
+# ===========================================================================
+
+class PlannerVisualizer:
+    """
+    Lightweight wrapper used by Firetruck during the build/debug phase
+    (firetruck_prm.py passes (width, length) to the constructor).
+    Plots the static PRM roadmap — not used during live simulation.
+    """
+
+    def __init__(self, car_dims: Tuple[float, float]):
+        self.car_width, self.car_length = car_dims
+
+    def plot_prm(self, map_obj, graph, nodes, path=None):
+        cs = map_obj.cell_size
+        gn = map_obj.grid_num
+        world = gn * cs
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        fig.patch.set_facecolor(_C["bg"])
+        ax.set_facecolor(_C["empty_cell"])
+        ax.set_xlim(0, world)
+        ax.set_ylim(0, world)
+        ax.set_aspect("equal")
+        ax.set_title("PRM Roadmap", color=_C["text_primary"], fontsize=12)
+
+        # Grid
+        for i in range(gn + 1):
+            v = i * cs
+            ax.axhline(v, color=_C["grid_line"], lw=0.3)
+            ax.axvline(v, color=_C["grid_line"], lw=0.3)
+
+        # Obstacles
+        for (row, col), data in map_obj.obstacle_coordinate_dict.items():
+            color = _STATUS_COLOR.get(data["status"].name, _C["intact"])
+            ax.add_patch(mpatches.Rectangle(
+                (row * cs, col * cs), cs, cs,
+                facecolor=color, edgecolor=_C["grid_line"], lw=0.3, zorder=2,
+            ))
+
+        # PRM edges (thin, dimmed)
+        for i, edges in graph.items():
+            xi, yi, _ = nodes[i]
+            for e in edges:
+                j = e["to"] if isinstance(e, dict) else e.node_to
+                xj, yj, _ = nodes[j]
+                ax.plot([xi, xj], [yi, yj],
+                        color=_C["text_dim"], lw=0.3, alpha=0.3, zorder=3)
+
+        # Nodes
+        xs = [n[0] for n in nodes]
+        ys = [n[1] for n in nodes]
+        ax.scatter(xs, ys, s=6, color=_C["truck_path"], zorder=4, alpha=0.7)
+
+        # Solution path
         if path:
             px = [p[0] for p in path]
             py = [p[1] for p in path]
-            ax.plot(px, py,
-                    color="#2ecc71", linewidth=2.5, zorder=5, label="A* path")
-            ax.scatter(px, py,
-                       color="#27ae60", s=12, zorder=6)
+            ax.plot(px, py, color=_C["truck_body"], lw=2, zorder=6)
 
-            # Start marker
-            ax.plot(px[0], py[0], "o",
-                    color="#1D9E75", markersize=10, zorder=7, label="Start")
-            # Goal marker
-            ax.plot(px[-1], py[-1], "*",
-                    color="#EF9F27", markersize=14, zorder=7, label="Goal")
-
-            # Heading arrow at start and goal
-            for pt, color in [(path[0], "#1D9E75"), (path[-1], "#EF9F27")]:
-                rad = math.radians(pt[2])
-                arr = max(limit * 0.025, 3.0)
-                ax.annotate(
-                    "",
-                    xy=(pt[0] + arr * math.cos(rad),
-                        pt[1] + arr * math.sin(rad)),
-                    xytext=(pt[0], pt[1]),
-                    arrowprops=dict(arrowstyle="->", color=color, lw=2.0),
-                    zorder=8,
-                )
-        else:
-            # No path — make it obvious in the title
-            ax.set_title(
-                f"PRM roadmap  |  {len(nodes)} nodes  |  no path found",
-                color="#c0392b",
-            )
-
-        # ── 6. Title and legend ─────────────────────────────────────────
-        if path:
-            ax.set_title(
-                f"PRM roadmap  |  {len(nodes)} nodes  |  path: {len(path)} waypoints"
-            )
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        ax.legend(loc="upper right", fontsize=8)
-
-        # ── 7. Show ─────────────────────────────────────────────────────
-        if own_fig:
-            plt.tight_layout()
-            if block:
-                plt.show()
-            else:
-                plt.show(block=False)
-                plt.pause(0.1)
-                input("Press [Enter] to close the PRM plot... ")
+        plt.tight_layout()
+        plt.show()
