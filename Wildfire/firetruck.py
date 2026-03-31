@@ -40,11 +40,6 @@ PRM_RANDOM = random.Random()
 # ---------------------------------------------------------------------------
 # Pure-Python Dubins implementation
 # ---------------------------------------------------------------------------
-# Mirrors the three-call API of the `dubins` Cython library:
-#   path   = dubins_shortest_path(q0_rad, q1_rad, r_min)
-#   length = path.path_length()
-#   poses  = path.sample_many(step_size)   # list of (x, y, theta_rad)
-# ---------------------------------------------------------------------------
 
 _PATH_TYPES = ["LSL", "RSR", "LSR", "RSL", "RLR", "LRL"]
 
@@ -111,7 +106,7 @@ class _DubinsPath:
         self.q0          = q0            # (x, y, theta_rad)
         self.r           = r
         self.path_type   = path_type
-        self.seg_lengths = seg_lengths   # physical lengths (meters)
+        self.seg_lengths = seg_lengths   # physical lengths (metres)
 
     def path_length(self) -> float:
         return sum(self.seg_lengths)
@@ -326,8 +321,8 @@ class Firetruck:
         xy = np.array([(n[0], n[1]) for n in self.nodes])
         self._kd_tree = KDTree(xy)
 
-    def _connect_nodes(self, k_neighbors: int = 20,
-                       r_connect: float = 30.0, step_size: float = 1.0) -> None:
+    def _connect_nodes(self, k_neighbors: int = 30,
+                       r_connect: float = 50.0, step_size: float = 1.0) -> None:
         if not self.nodes or self._kd_tree is None:
             return
         for i, q_i in enumerate(self.nodes):
@@ -344,6 +339,94 @@ class Firetruck:
     # ------------------------------------------------------------------
     # QUERY PHASE
     # ------------------------------------------------------------------
+
+    def path_cost(
+        self,
+        goal_state:  State,
+        start_state: Optional[State] = None,
+    ) -> float:
+        """
+        Return the estimated Dubins path cost (metres) from start_state to
+        goal_state through the PRM, without storing any path or mutating
+        any internal state.
+
+        Used by the engine's fire-selection logic to compare the true
+        planning cost to multiple candidate fires and pick the cheapest one,
+        rather than defaulting to the nearest fire by Euclidean distance.
+
+        A Dubins truck cannot reverse, so the shortest driving path to a
+        fire that is behind the truck can be far longer than the straight-
+        line distance.  This method captures that asymmetry correctly.
+
+        Returns float('inf') if no path exists (fire is unreachable from
+        the current pose through the current PRM graph).
+
+        FIX: was calling self._rs_poses / self._rs_length which do not exist
+        in the Dubins version.  Corrected to self._dubins_poses /
+        self._dubins_length throughout.
+        """
+        if self._roadmap_size == 0:
+            return float("inf")
+
+        if start_state is None:
+            fp = self.map.firetruck_pose
+            start_state = (float(fp[0]), float(fp[1]), float(fp[2]))
+
+        # Fast path: direct collision-free Dubins arc — no graph needed
+        direct_path = self._dubins_poses(start_state, goal_state)
+        if direct_path and self.cspace.is_path_free(direct_path):
+            return self._dubins_length(start_state, goal_state)
+
+        # Full PRM probe — inject temp nodes, run A*, read g_score, clean up
+        start_idx = self._inject_query_node(start_state, outgoing=True)
+        goal_idx  = self._inject_query_node(goal_state,  outgoing=False)
+
+        cost = float("inf")
+        if start_idx is not None and goal_idx is not None:
+            cost = self._astar_cost(start_idx, goal_idx)
+
+        self._cleanup_query_nodes()
+        return cost
+
+    def _astar_cost(self, start_idx: int, goal_idx: int) -> float:
+        """
+        Run A* and return only the total path cost, not the node sequence.
+        Identical logic to _astar but returns g_score[goal] instead of
+        unwinding came_from — avoids building the index list for probes
+        that only need the cost.
+
+        FIX: was calling self._rs_length which does not exist in the Dubins
+        version.  Corrected to self._dubins_length.
+        """
+        q_goal  = self.nodes[goal_idx]
+        h_cache: Dict[int, float] = {}
+
+        def h(idx: int) -> float:
+            if idx not in h_cache:
+                h_cache[idx] = self._dubins_length(self.nodes[idx], q_goal)
+            return h_cache[idx]
+
+        open_set = [(h(start_idx), start_idx)]
+        g_score  = {start_idx: 0.0}
+        visited  = set()
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+            if current in visited:
+                continue
+            visited.add(current)
+            if current == goal_idx:
+                return g_score[goal_idx]
+            for edge in self.graph.get(current, []):
+                nbr   = edge["to"]
+                if nbr in visited:
+                    continue
+                new_g = g_score[current] + edge["cost"]
+                if new_g < g_score.get(nbr, float("inf")):
+                    g_score[nbr] = new_g
+                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
+
+        return float("inf")
 
     def plan(self, goal_state: State,
              start_state: Optional[State] = None) -> Optional[List[State]]:
@@ -366,13 +449,31 @@ class Firetruck:
             if path_indices is None:
                 print("plan(): A* found no path through the PRM.")
 
-        # Reconstruct BEFORE cleanup: path_indices reference temp nodes
-        # (start_idx, goal_idx) which are still in self.nodes at this point.
-        # Calling _cleanup_query_nodes() first truncates self.nodes back to
-        # _roadmap_size, making those temp indices invalid → IndexError.
+        # Reconstruct BEFORE cleanup — path_indices reference temp nodes
+        # still in self.nodes.  Cleaning up first causes IndexError.
         waypoints = self._reconstruct_path(path_indices) if path_indices else None
         self._cleanup_query_nodes()
         return waypoints
+
+    def _se2_distance(self, q1: State, q2: State) -> float:
+        """
+        SE(2)-aware distance combining position and heading.
+
+        The KD-tree only indexes (x,y).  Two nodes at the same position
+        but opposite headings are distance-0 in the tree but require a
+        full U-turn in Dubins space.  Adding a heading term weighted by
+        r_min (in metres) gives a unified distance that correctly
+        deprioritises poorly-aligned neighbours.
+
+            d = sqrt(dx² + dy² + (r_min × Δθ_wrapped_rad)²)
+        """
+        dx  = q1[0] - q2[0]
+        dy  = q1[1] - q2[1]
+        dth = abs(q1[2] - q2[2]) % 360
+        if dth > 180:
+            dth = 360 - dth
+        dth_rad = math.radians(dth)
+        return math.sqrt(dx*dx + dy*dy + (self.car.r_min * dth_rad) ** 2)
 
     def _inject_query_node(self, q: State, outgoing: bool,
                            k: int = 10, r: float = 40.0) -> Optional[int]:
@@ -385,10 +486,14 @@ class Firetruck:
         if n_query == 0:
             return None
 
-        _, k_idxs  = self._kd_tree.query(pos, k=n_query)
-        r_idxs     = self._kd_tree.query_ball_point(pos, r=r)
-        candidates = (set(np.atleast_1d(k_idxs).tolist()) | set(r_idxs)) - {idx}
-        candidates = {c for c in candidates if c < self._roadmap_size}
+        _, k_idxs = self._kd_tree.query(pos, k=n_query)
+        r_idxs    = self._kd_tree.query_ball_point(pos, r=r)
+        raw_cands = (set(np.atleast_1d(k_idxs).tolist()) | set(r_idxs)) - {idx}
+        raw_cands = {c for c in raw_cands if c < self._roadmap_size}
+
+        # Sort by SE(2) distance — try most heading-compatible nodes first
+        candidates = sorted(raw_cands,
+                            key=lambda j: self._se2_distance(q, self.nodes[j]))
 
         connected = False
         for j in candidates:
@@ -421,10 +526,17 @@ class Firetruck:
 
     def _astar(self, start_idx: int, goal_idx: int) -> Optional[List[int]]:
         q_goal   = self.nodes[goal_idx]
-        open_set = [(self._dubins_length(self.nodes[start_idx], q_goal), start_idx)]
-        g_score  = {start_idx: 0.0}
+        h_cache: Dict[int, float] = {}
+
+        def h(idx: int) -> float:
+            if idx not in h_cache:
+                h_cache[idx] = self._dubins_length(self.nodes[idx], q_goal)
+            return h_cache[idx]
+
+        open_set  = [(h(start_idx), start_idx)]
+        g_score   = {start_idx: 0.0}
         came_from: Dict[int, int] = {}
-        visited  = set()
+        visited   = set()
 
         while open_set:
             _, current = heapq.heappop(open_set)
@@ -439,8 +551,7 @@ class Firetruck:
                 if new_g < g_score.get(nbr, float("inf")):
                     g_score[nbr]   = new_g
                     came_from[nbr] = current
-                    h = self._dubins_length(self.nodes[nbr], q_goal)
-                    heapq.heappush(open_set, (new_g + h, nbr))
+                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
         return None
 
     @staticmethod

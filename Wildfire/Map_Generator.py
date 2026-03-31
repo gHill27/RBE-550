@@ -217,6 +217,8 @@ class Map:
     
         return (goal_x, goal_y, angle_to_fire)
     
+    def get_status(self,coordinate):
+        return self.obstacle_coordinate_dict[coordinate]['status']
         
     def generate_safe_map(self, start_pos, wumpus_pos, buffer_radius=6.0):
         """

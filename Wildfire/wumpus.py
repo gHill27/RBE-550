@@ -166,12 +166,13 @@ class Wumpus:
         closest      = None
         for obstacle in self.map.obstacle_set:
             # Compare in world metres: obstacle cell → its centre
-            ox   = obstacle[0] * cs + cs / 2.0
-            oy   = obstacle[1] * cs + cs / 2.0
-            dist = math.hypot(wx - ox, wy - oy)
-            if dist < closest_dist:
-                closest_dist = dist
-                closest      = obstacle
+            if self.map.get_status(obstacle) == Status.INTACT:
+                ox   = obstacle[0] * cs + cs / 2.0
+                oy   = obstacle[1] * cs + cs / 2.0
+                dist = math.hypot(wx - ox, wy - oy)
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest      = obstacle
 
         return closest
 

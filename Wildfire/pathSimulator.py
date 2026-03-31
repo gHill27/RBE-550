@@ -44,7 +44,7 @@ from Map_Generator import Map, Status
 from firetruck import Firetruck
 from wumpus import Wumpus
 from pathVisualizer import SimVisualizer
-
+import math
 # Type alias kept consistent with firetruck_prm.py
 State = Tuple[float, float, float]
 
@@ -90,7 +90,7 @@ class SimulationEngine:
         firetruck_start: State = (25.0, 25.0, 0.0),
         wumpus_start:    Tuple[float, float] = (220.0, 220.0),
         prm_nodes:       int   = 500,
-        replan_interval: float = 5.0,
+        replan_interval: float = 30.0,
         tick_real_time:  float = 0.05,
         plot:            bool  = True,
         sim_duration:    float = 3600.0,
@@ -254,12 +254,112 @@ class SimulationEngine:
 
     def _refresh_goal(self) -> None:
         """
-        Ask the map for the best current goal and update map.firetruck_goal.
-        Always normalises the raw return value to a 3-tuple before storing.
+        Select the best reachable fire goal and store it on the map.
+ 
+        When fires are active, calls _select_best_fire_goal() to rank every
+        burning cell by its true Dubins path cost from the current truck pose,
+        and picks the cheapest reachable one.
+ 
+        Falls back to the wumpus position (normalised to a 3-tuple) when
+        there are no active fires.
         """
-        goal = self._normalize_goal(self.map.find_firetruck_goal())
+        if self.map.active_fires:
+            goal = self._select_best_fire_goal()
+        else:
+            goal = self._normalize_goal(self.map.find_firetruck_goal())
+ 
         if goal:
             self.map.update_goal(goal)
+
+
+    def _select_best_fire_goal(self) -> Optional[State]:
+        """
+        Rank every active fire by its Dubins path cost from the current
+        truck pose and return a goal state for the cheapest reachable one.
+ 
+        Why this matters
+        ----------------
+        Dubins curves are asymmetric: a fire that is physically "close"
+        but lies directly behind the truck requires a wide U-turn arc
+        before the truck can approach it forward.  Euclidean distance
+        completely misses this — it treats all fires at the same radius
+        identically regardless of heading.
+ 
+        This method probes the PRM planner for each candidate fire and
+        ranks them by what it would actually cost to drive there.  Fires
+        that are behind the truck, across obstacles, or in dead-ends are
+        naturally deprioritised even if they are metrically "closer".
+ 
+        Implementation
+        --------------
+        Calling firetruck.path_cost() per fire runs a lightweight A* probe
+        (inject two temp nodes, run search, clean up) without touching the
+        stored firetruck path or roadmap.  For a typical simulation with
+        3-10 active fires the overhead is negligible compared to the full
+        plan() call that follows.
+ 
+        Returns None if no fire is reachable from the current pose.
+        """
+        cs    = self.map.cell_size
+        pose  = self.map.firetruck_pose
+        start = (float(pose[0]), float(pose[1]), float(pose[2]))
+        stop  = cs * 1.5   # park stop_distance short of the fire cell edge
+ 
+        best_cost = float("inf")
+        best_goal: Optional[State] = None
+ 
+        for cell in self.map.active_fires:
+            # Convert grid cell to world-metre centre
+            fire_wx = cell[0] * cs + cs / 2.0
+            fire_wy = cell[1] * cs + cs / 2.0
+ 
+            # Direction from truck to fire
+            dx   = fire_wx - start[0]
+            dy   = fire_wy - start[1]
+            dist = math.hypot(dx, dy)
+ 
+            if dist < 1e-3:
+                # Already on top of this fire — zero cost, take it immediately
+                return (start[0], start[1], start[2])
+ 
+            angle_deg = math.degrees(math.atan2(dy, dx)) % 360.0
+ 
+            if dist <= stop:
+                # Already within stop distance — face the fire, cost = 0
+                goal: State = (start[0], start[1], angle_deg)
+                return goal
+ 
+            # Goal = stop_distance short along truck→fire vector
+            ratio  = (dist - stop) / dist
+            goal_x = start[0] + dx * ratio
+            goal_y = start[1] + dy * ratio
+ 
+            # Reject goals that land inside an obstacle
+            goal_cell = (int(goal_x / cs), int(goal_y / cs))
+            if goal_cell in self.map.obstacle_set:
+                continue
+ 
+            candidate: State = (goal_x, goal_y, angle_deg)
+ 
+            # Probe the PRM planner for the real driving cost
+            cost = self.firetruck.path_cost(
+                goal_state  = candidate,
+                start_state = start,
+            )
+ 
+            if cost < best_cost:
+                best_cost = cost
+                best_goal = candidate
+ 
+        if best_goal is None:
+            # No fire was reachable — fall back to wumpus or centre
+            return self._normalize_goal(self.map.find_firetruck_goal())
+ 
+        print(
+            f"[Engine] Best fire goal: {best_goal} "
+            f"(Dubins cost={best_cost:.1f}m, t={self.map.sim_time:.1f}s)"
+        )
+        return best_goal
 
     def _goal_has_changed(self) -> bool:
         """
