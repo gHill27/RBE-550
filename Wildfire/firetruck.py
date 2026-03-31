@@ -24,6 +24,9 @@ from scipy.spatial import KDTree
 from shapely.affinity import rotate, translate
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
+
+from rsplan import planner
 
 from Map_Generator import Map
 from pathVisualizer import PlannerVisualizer
@@ -38,139 +41,40 @@ Point2D: TypeAlias = Tuple[float, float]
 PRM_RANDOM = random.Random()
 
 # ---------------------------------------------------------------------------
-# Pure-Python Dubins implementation
+# Reeds-Shepp implementation (via rsplan)
 # ---------------------------------------------------------------------------
 
-_PATH_TYPES = ["LSL", "RSR", "LSR", "RSL", "RLR", "LRL"]
-
-
-def _mod2pi(a: float) -> float:
-    return a % (2.0 * math.pi)
-
-
-def _dubins_compute(path_type: str, d: float, a: float, b: float):
-    """Return (t, p, q) normalised segment lengths, or None if invalid."""
-    sa, ca = math.sin(a), math.cos(a)
-    sb, cb = math.sin(b), math.cos(b)
-
-    if path_type == "LSL":
-        p_sq = 2 + d*d - 2*math.cos(a - b) + 2*d*(sa - sb)
-        if p_sq < 0: return None
-        p = math.sqrt(p_sq)
-        tmp = math.atan2(cb - ca, d + sa - sb)
-        return _mod2pi(-a + tmp), p, _mod2pi(b - tmp)
-
-    if path_type == "RSR":
-        p_sq = 2 + d*d - 2*math.cos(a - b) + 2*d*(sb - sa)
-        if p_sq < 0: return None
-        p = math.sqrt(p_sq)
-        tmp = math.atan2(ca - cb, d - sa + sb)
-        return _mod2pi(a - tmp), p, _mod2pi(_mod2pi(-b) + tmp)
-
-    if path_type == "LSR":
-        p_sq = -2 + d*d + 2*math.cos(a - b) + 2*d*(sa + sb)
-        if p_sq < 0: return None
-        p = math.sqrt(p_sq)
-        tmp = math.atan2(-ca - cb, d + sa + sb) - math.atan2(-2.0, p)
-        return _mod2pi(-a + tmp), p, _mod2pi(-_mod2pi(b) + tmp)
-
-    if path_type == "RSL":
-        p_sq = -2 + d*d + 2*math.cos(a - b) - 2*d*(sa + sb)
-        if p_sq < 0: return None
-        p = math.sqrt(p_sq)
-        tmp = math.atan2(ca + cb, d - sa - sb) - math.atan2(2.0, p)
-        return _mod2pi(a - tmp), p, _mod2pi(b - tmp)
-
-    if path_type == "RLR":
-        val = (6 - d*d + 2*math.cos(a - b) + 2*d*(sa - sb)) / 8.0
-        if abs(val) > 1: return None
-        p = _mod2pi(2*math.pi - math.acos(val))
-        t = _mod2pi(a - math.atan2(ca - cb, d - sa + sb) + p / 2.0)
-        return t, p, _mod2pi(a - b - t + p)
-
-    if path_type == "LRL":
-        val = (6 - d*d + 2*math.cos(a - b) + 2*d*(-sa + sb)) / 8.0
-        if abs(val) > 1: return None
-        p = _mod2pi(2*math.pi - math.acos(val))
-        t = _mod2pi(-a + math.atan2(-ca + cb, d + sa - sb) + p / 2.0)
-        return t, p, _mod2pi(_mod2pi(b) - a - t + p)
-
-    return None
-
-
-class _DubinsPath:
-    """Lightweight Dubins path object returned by dubins_shortest_path()."""
-
-    def __init__(self, q0, r: float, path_type: str,
-                 seg_lengths: Tuple[float, float, float]):
-        self.q0          = q0            # (x, y, theta_rad)
-        self.r           = r
-        self.path_type   = path_type
-        self.seg_lengths = seg_lengths   # physical lengths (metres)
+class _ReedsSheppPath:
+    """Wrapper to maintain compatibility with your existing PRM logic."""
+    def __init__(self, q0: Tuple[float, float, float], r: float, q1: Tuple[float, float, float]):
+        self.q0 = q0  # (x, y, theta_rad)
+        self.r = r
+        # rsplan computes the optimal path (shortest distance or fewest segments)
+        # We set a large step_size initially; sampling happens in sample_many()
+        self._path = planner.path(q0, q1, r, 0.0 ,2.0)
 
     def path_length(self) -> float:
-        return sum(self.seg_lengths)
+        # Summing segment lengths from the internal rsplan path object
+        return sum(abs(seg.length) for seg in self._path.segments)
 
     def sample_many(self, step_size: float) -> Tuple[List[Tuple], None]:
-        """Return (list_of_(x,y,theta_rad), None) — mirrors pydubins API."""
-        x, y, theta = self.q0
-        r     = self.r
-        poses = [(x, y, theta)]
-
-        for seg_len, turn in zip(self.seg_lengths, self.path_type):
-            remaining = seg_len
-            while remaining > 1e-9:
-                step = min(step_size, remaining)
-                if turn == "S":
-                    x     += step * math.cos(theta)
-                    y     += step * math.sin(theta)
-                elif turn == "L":
-                    dth    = step / r
-                    cx, cy = x - r*math.sin(theta), y + r*math.cos(theta)
-                    theta += dth
-                    x, y   = cx + r*math.sin(theta), cy - r*math.cos(theta)
-                elif turn == "R":
-                    dth    = step / r
-                    cx, cy = x + r*math.sin(theta), y - r*math.cos(theta)
-                    theta -= dth
-                    x, y   = cx - r*math.sin(theta), cy + r*math.cos(theta)
-                poses.append((x, y, theta))
-                remaining -= step
-
+        """Returns (list_of_(x, y, theta_rad), None) to mirror your current API."""
+        # rsplan's waypoints() generates the interpolated states
+        poses = [(w.x, w.y, w.yaw) for w in self._path.waypoints()]
         return poses, None
 
-
-def dubins_shortest_path(
+def reeds_shepp_shortest_path(
     q0: Tuple[float, float, float],
     q1: Tuple[float, float, float],
     r: float,
-) -> Optional[_DubinsPath]:
-    """
-    Shortest Dubins path from q0 to q1 with turning radius r.
-    q0, q1 = (x, y, theta_radians).  Returns None if configurations coincide.
-    """
+) -> Optional[_ReedsSheppPath]:
+    """Shortest Reeds-Shepp path from q0 to q1 with turning radius r."""
     dx, dy = q1[0] - q0[0], q1[1] - q0[1]
-    D = math.hypot(dx, dy)
-    if D < 1e-6:
+    if math.hypot(dx, dy) < 1e-6 and abs(q0[2] - q1[2]) < 1e-6:
         return None
-
-    theta = math.atan2(dy, dx)
-    d, a, b = D / r, _mod2pi(q0[2] - theta), _mod2pi(q1[2] - theta)
-
-    best_len, best_type, best_segs = float("inf"), None, None
-    for ptype in _PATH_TYPES:
-        result = _dubins_compute(ptype, d, a, b)
-        if result is None:
-            continue
-        t, p, q = result
-        if t < 0 or q < 0 or (ptype in ("RLR", "LRL") and p < 0):
-            continue
-        total = (t + abs(p) + q) * r
-        if total < best_len:
-            best_len, best_type, best_segs = total, ptype, (t*r, abs(p)*r, q*r)
-
-    return _DubinsPath(q0, r, best_type, best_segs) if best_type else None
-
+    
+    # Return our wrapper object which handles the rsplan logic internally
+    return _ReedsSheppPath(q0, r, q1)
 
 # ===========================================================================
 # CarModel
@@ -223,20 +127,30 @@ class ConfigurationSpace:
                  obstacle_set, cell_size: float = 5.0):
         self.car        = car
         self._world_box = box(0.01, 0.01, world_size, world_size)
-        polys = [
+        self.polys = [
             box(r * cell_size, c * cell_size,
                 r * cell_size + cell_size, c * cell_size + cell_size)
             for r, c in obstacle_set
         ]
-        self.full_obstacle_geometry = unary_union(polys) if polys else None
+        self.full_obstacle_geometry = STRtree(self.polys) if self.polys else None
 
     def is_free(self, x: float, y: float, theta_deg: float) -> bool:
         fp = self.car.footprint_at(x, y, theta_deg)
-        if not fp.within(self._world_box):
+        # 2. Fast Boundary Check
+        if not self._world_box.contains(fp):
             return False
-        if (self.full_obstacle_geometry is not None
-                and fp.intersects(self.full_obstacle_geometry)):
-            return False
+            
+        # 3. Spatial Query
+        # query() returns indices of obstacles whose BOUNDING BOXES 
+        # intersect the footprint's bounding box.
+        possible_matches_indices = self.full_obstacle_geometry.query(fp)
+        
+        # 4. Narrow-phase collision check
+        # Only check actual intersection for the candidates found by the tree
+        for idx in possible_matches_indices:
+            if fp.intersects(self.polys[idx]):
+                return False
+                
         return True
 
     def is_path_free(self, poses: List[State]) -> bool:
@@ -265,13 +179,14 @@ class Firetruck:
         self.viz = PlannerVisualizer((self.car.width, self.car.length)) if plot else None
 
     # ------------------------------------------------------------------
-    # Dubins helpers
+    # Reeds-Shepp helpers (updated from Dubins)
     # ------------------------------------------------------------------
 
-    def _dubins(self, q_start: State, q_end: State) -> Optional[_DubinsPath]:
+    def _dubins(self, q_start: State, q_end: State) -> Optional[_ReedsSheppPath]:
         q0 = (q_start[0], q_start[1], math.radians(q_start[2]))
         q1 = (q_end[0],   q_end[1],   math.radians(q_end[2]))
-        return dubins_shortest_path(q0, q1, self.car.r_min)
+        # Renamed internal call to our new Reeds-Shepp wrapper
+        return reeds_shepp_shortest_path(q0, q1, self.car.r_min)
 
     def _dubins_length(self, q_start: State, q_end: State) -> float:
         path = self._dubins(q_start, q_end)
@@ -279,7 +194,7 @@ class Firetruck:
 
     def _dubins_poses(self, q_start: State, q_end: State,
                       step_size: float = 1.0) -> List[State]:
-        """Interpolated (x, y, theta_deg) poses along the shortest Dubins path."""
+        """Interpolated (x, y, theta_deg) poses along the Reeds-Shepp path."""
         path = self._dubins(q_start, q_end)
         if path is None:
             return []
@@ -340,70 +255,95 @@ class Firetruck:
     # QUERY PHASE
     # ------------------------------------------------------------------
 
-    def path_cost(
+    def _fire_goal_nodes(self, fire_cell: Tuple[int, int],
+                         radius: float = 10.0) -> List[int]:
+        """
+        Return indices of all roadmap nodes whose (x,y) position lies
+        within `radius` metres of the centre of `fire_cell`.
+
+        These nodes are used directly as goal candidates in plan_to_fire()
+        without any injection — every one already has full graph connectivity
+        from build time, so no new Dubins solves are needed on the goal side.
+        """
+        cs  = self.map.cell_size
+        cx  = fire_cell[0] * cs + cs / 2.0
+        cy  = fire_cell[1] * cs + cs / 2.0
+        pos = np.array([cx, cy])
+        idxs = self._kd_tree.query_ball_point(pos, r=radius)
+        return [i for i in idxs if i < self._roadmap_size]
+
+    def _astar_multi_goal(
         self,
-        goal_state:  State,
-        start_state: Optional[State] = None,
-    ) -> float:
+        start_idx: int,
+        goal_set:  set,
+    ) -> Optional[List[int]]:
         """
-        Return the estimated Dubins path cost (metres) from start_state to
-        goal_state through the PRM, without storing any path or mutating
-        any internal state.
+        A* search that terminates at the CHEAPEST member of goal_set.
 
-        Used by the engine's fire-selection logic to compare the true
-        planning cost to multiple candidate fires and pick the cheapest one,
-        rather than defaulting to the nearest fire by Euclidean distance.
+        Unlike single-goal A*, there is no single q_goal to compute a
+        heuristic against.  We use the minimum Dubins distance to any
+        goal node as the heuristic — this remains admissible because the
+        true cost to reach the goal set is at least as large as the
+        cheapest free-space arc to the nearest goal.
 
-        A Dubins truck cannot reverse, so the shortest driving path to a
-        fire that is behind the truck can be far longer than the straight-
-        line distance.  This method captures that asymmetry correctly.
-
-        Returns float('inf') if no path exists (fire is unreachable from
-        the current pose through the current PRM graph).
-
-        FIX: was calling self._rs_poses / self._rs_length which do not exist
-        in the Dubins version.  Corrected to self._dubins_poses /
-        self._dubins_length throughout.
+        The search pops nodes in order of f = g + h.  The first time any
+        goal node is popped it is guaranteed to be the cheapest reachable
+        goal (A* optimality).
         """
-        if self._roadmap_size == 0:
-            return float("inf")
-
-        if start_state is None:
-            fp = self.map.firetruck_pose
-            start_state = (float(fp[0]), float(fp[1]), float(fp[2]))
-
-        # Fast path: direct collision-free Dubins arc — no graph needed
-        direct_path = self._dubins_poses(start_state, goal_state)
-        if direct_path and self.cspace.is_path_free(direct_path):
-            return self._dubins_length(start_state, goal_state)
-
-        # Full PRM probe — inject temp nodes, run A*, read g_score, clean up
-        start_idx = self._inject_query_node(start_state, outgoing=True)
-        goal_idx  = self._inject_query_node(goal_state,  outgoing=False)
-
-        cost = float("inf")
-        if start_idx is not None and goal_idx is not None:
-            cost = self._astar_cost(start_idx, goal_idx)
-
-        self._cleanup_query_nodes()
-        return cost
-
-    def _astar_cost(self, start_idx: int, goal_idx: int) -> float:
-        """
-        Run A* and return only the total path cost, not the node sequence.
-        Identical logic to _astar but returns g_score[goal] instead of
-        unwinding came_from — avoids building the index list for probes
-        that only need the cost.
-
-        FIX: was calling self._rs_length which does not exist in the Dubins
-        version.  Corrected to self._dubins_length.
-        """
-        q_goal  = self.nodes[goal_idx]
+        # Precompute heuristic: min Dubins distance from node to any goal
         h_cache: Dict[int, float] = {}
 
         def h(idx: int) -> float:
             if idx not in h_cache:
-                h_cache[idx] = self._dubins_length(self.nodes[idx], q_goal)
+                q_node = self.nodes[idx]
+                h_cache[idx] = min(
+                    self._dubins_length(q_node, self.nodes[g])
+                    for g in goal_set
+                )
+            return h_cache[idx]
+
+        open_set  = [(h(start_idx), start_idx)]
+        g_score   = {start_idx: 0.0}
+        came_from: Dict[int, int] = {}
+        visited   = set()
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+            if current in visited:
+                continue
+            visited.add(current)
+
+            if current in goal_set:
+                return self._unwind(came_from, current)
+
+            for edge in self.graph.get(current, []):
+                nbr   = edge["to"]
+                new_g = g_score[current] + edge["cost"]
+                if new_g < g_score.get(nbr, float("inf")):
+                    g_score[nbr]   = new_g
+                    came_from[nbr] = current
+                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
+
+        return None
+
+    def _astar_multi_goal_cost(
+        self,
+        start_idx: int,
+        goal_set:  set,
+    ) -> float:
+        """
+        Same as _astar_multi_goal but returns only the cost.
+        Used by cost_to_fire() to rank fires without building the path list.
+        """
+        h_cache: Dict[int, float] = {}
+
+        def h(idx: int) -> float:
+            if idx not in h_cache:
+                q_node = self.nodes[idx]
+                h_cache[idx] = min(
+                    self._dubins_length(q_node, self.nodes[g])
+                    for g in goal_set
+                )
             return h_cache[idx]
 
         open_set = [(h(start_idx), start_idx)]
@@ -415,12 +355,10 @@ class Firetruck:
             if current in visited:
                 continue
             visited.add(current)
-            if current == goal_idx:
-                return g_score[goal_idx]
+            if current in goal_set:
+                return g_score[current]
             for edge in self.graph.get(current, []):
                 nbr   = edge["to"]
-                if nbr in visited:
-                    continue
                 new_g = g_score[current] + edge["cost"]
                 if new_g < g_score.get(nbr, float("inf")):
                     g_score[nbr] = new_g
@@ -428,8 +366,98 @@ class Firetruck:
 
         return float("inf")
 
+    def plan_to_fire(
+        self,
+        fire_cell:   Tuple[int, int],
+        start_state: Optional[State] = None,
+        radius:      float = 10.0,
+    ) -> Optional[List[State]]:
+        """
+        Plan from start_state to the cheapest roadmap node within `radius`
+        metres of `fire_cell`, injecting only the start node.
+
+        Why no goal injection
+        ---------------------
+        The old plan(goal_state) approach:
+          1. Computed a geometric stop-short point along the truck→fire vector.
+          2. Injected it as a temp goal node, trying Dubins connections to
+             the roadmap.
+          3. Ran single-goal A* to that one point.
+
+        Problem: the stop-short point was computed from the current truck
+        position, so it always picked the face of the obstacle closest to
+        where the truck currently is — not the face that is cheapest to
+        actually reach via the road network.  A fire behind a wall cluster
+        would produce a goal on the near side that required a long detour,
+        when the far side was directly reachable via an existing corridor.
+
+        This method instead:
+          1. Finds all roadmap nodes already within `radius` metres of the
+             fire centre (KD-tree lookup, no Dubins solves).
+          2. Injects only the start node (half the Dubins overhead).
+          3. Runs multi-goal A* — terminates at whichever goal node is
+             cheapest via the existing graph.  The graph chooses the best
+             approach angle automatically.
+        """
+        if self._roadmap_size == 0:
+            raise RuntimeError("Call build_tree() before plan_to_fire().")
+
+        if start_state is None:
+            fp = self.map.firetruck_pose
+            start_state = (float(fp[0]), float(fp[1]), float(fp[2]))
+
+        goal_nodes = self._fire_goal_nodes(fire_cell, radius)
+        if not goal_nodes:
+            return None
+
+        start_idx = self._inject_query_node(start_state, outgoing=True)
+        if start_idx is None:
+            self._cleanup_query_nodes()
+            return None
+
+        path_indices = self._astar_multi_goal(start_idx, set(goal_nodes))
+        waypoints    = self._reconstruct_path(path_indices) if path_indices else None
+        self._cleanup_query_nodes()
+        return waypoints
+
+    def cost_to_fire(
+        self,
+        fire_cell:   Tuple[int, int],
+        start_state: Optional[State] = None,
+        radius:      float = 10.0,
+    ) -> float:
+        """
+        Cheapest A* cost (metres) from start_state to any roadmap node
+        within `radius` metres of `fire_cell`.  Only injects start node.
+        Used by the engine to rank fires before committing to a plan.
+        Returns float('inf') if no goal node is reachable.
+        """
+        if self._roadmap_size == 0:
+            return float("inf")
+
+        if start_state is None:
+            fp = self.map.firetruck_pose
+            start_state = (float(fp[0]), float(fp[1]), float(fp[2]))
+
+        goal_nodes = self._fire_goal_nodes(fire_cell, radius)
+        if not goal_nodes:
+            return float("inf")
+
+        start_idx = self._inject_query_node(start_state, outgoing=True)
+        if start_idx is None:
+            self._cleanup_query_nodes()
+            return float("inf")
+
+        cost = self._astar_multi_goal_cost(start_idx, set(goal_nodes))
+        self._cleanup_query_nodes()
+        return cost
+
     def plan(self, goal_state: State,
              start_state: Optional[State] = None) -> Optional[List[State]]:
+        """
+        Single-goal planner — kept for wumpus chase and precise targets.
+        Injects both start and goal as temp nodes.
+        """
         if self._roadmap_size == 0:
             raise RuntimeError("Call build_tree() before plan().")
         if start_state is None:
@@ -449,8 +477,6 @@ class Firetruck:
             if path_indices is None:
                 print("plan(): A* found no path through the PRM.")
 
-        # Reconstruct BEFORE cleanup — path_indices reference temp nodes
-        # still in self.nodes.  Cleaning up first causes IndexError.
         waypoints = self._reconstruct_path(path_indices) if path_indices else None
         self._cleanup_query_nodes()
         return waypoints
@@ -516,8 +542,13 @@ class Firetruck:
             self.graph.pop(idx, None)
         for i in range(self._roadmap_size):
             if i in self.graph:
-                self.graph[i] = [e for e in self.graph[i]
-                                  if e["to"] < self._roadmap_size]
+                # Rebuild the edge list, filtering out any 'to' that is in temp_indices
+                self.graph[i] = [
+                    edge for edge in self.graph[i]
+                    if edge["to"] < self._roadmap_size
+                ]
+
+        # 4. Truncate the nodes list back to permanent size
         self.nodes = self.nodes[:self._roadmap_size]
 
     # ------------------------------------------------------------------

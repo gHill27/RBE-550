@@ -18,7 +18,7 @@ engine = SimulationEngine(
     wumpus_start    = (220.0, 220.0),       # (x_m, y_m)
     prm_nodes       = 100,          # PRM roadmap size
     replan_interval = 5.0,          # sim-seconds between replans
-    tick_real_time  = 0.005,         # wall-clock seconds per tick
+    tick_real_time  = 0.0005,         # wall-clock seconds per tick
     plot            = True,
     sim_duration    = 3600.0,       # 1 hour of sim time
 )
