@@ -131,7 +131,9 @@ class Map:
         self, coordinates: list[tuple[float, float]], status: Status
     ):  
         # obstacles_to_change_status = self.find_neighbor_obstacles(coordinate=coordinate)
-        if isinstance(coordinates,tuple):
+        if not isinstance(coordinates,list):
+            if len(coordinates) == 2:
+                coordinates = (coordinates[0],coordinates[1],0.0)
             coordinates = [coordinates]
         for coord in coordinates:
             currStatus = self.obstacle_coordinate_dict[coord]["status"]

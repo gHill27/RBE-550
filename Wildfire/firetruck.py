@@ -143,13 +143,14 @@ class ConfigurationSpace:
         # 3. Spatial Query
         # query() returns indices of obstacles whose BOUNDING BOXES 
         # intersect the footprint's bounding box.
-        possible_matches_indices = self.full_obstacle_geometry.query(fp)
-        
-        # 4. Narrow-phase collision check
-        # Only check actual intersection for the candidates found by the tree
-        for idx in possible_matches_indices:
-            if fp.intersects(self.polys[idx]):
-                return False
+        if self.full_obstacle_geometry:
+            possible_matches_indices = self.full_obstacle_geometry.query(fp)
+            
+            # 4. Narrow-phase collision check
+            # Only check actual intersection for the candidates found by the tree
+            for idx in possible_matches_indices:
+                if fp.intersects(self.polys[idx]):
+                    return False
                 
         return True
 

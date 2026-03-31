@@ -10,7 +10,7 @@ Responsibilities
   - Drives the per-tick loop: clock advance → fire spread → goal selection
     → replanning → pose updates → visualizer redraw.
   - Exposes clean hooks so each agent stays focused on its own logic:
-      Firetruck  → path planning (PRM + Dubins)
+      Firetruck  → path planning (PRM + Reeds-Shepp)
       Wumpus     → path planning (A*)
       Map        → world state (obstacles, fire, time)
       Visualizer → display only
@@ -31,6 +31,7 @@ Usage
         replan_interval = 5.0,   # seconds of sim time between replans
         tick_real_time  = 0.05,  # wall-clock seconds per tick (display speed)
         plot            = True,
+        plot_prm        = False, # set True to open the PRM debug visualizer
     )
     engine.run()
 """
@@ -78,28 +79,46 @@ class SimulationEngine:
         Wall-clock seconds to sleep between sim ticks.
         0.0 = run as fast as possible.
     plot : bool
-        Whether to open the matplotlib display window.
+        Whether to open the main simulation matplotlib display window.
+    plot_prm : bool
+        Whether to open the PRM debug visualizer window (PlannerVisualizer).
+        Useful for inspecting the roadmap graph and sampled nodes during
+        development.  Has no effect on simulation logic.
     sim_duration : float
         Maximum simulated seconds before the engine stops (default 3600).
+    extinguish_margin : float
+        Extra sim-seconds of buffer required beyond proximity_duration when
+        pre-filtering reachable fires.  A fire is only targeted if the truck
+        can reach it AND still have (proximity_duration + extinguish_margin)
+        seconds of burn time remaining.  Default 5.0 s.
+    burn_lifetime : float
+        Total sim-seconds a cell burns before it burns out naturally.
+        Used to compute remaining burn time for triage.  Default 30.0 s.
     """
 
     def __init__(
         self,
-        grid_num:        int   = 50,
-        cell_size:       float = 5.0,
-        fill_percent:    float = 0.15,
-        firetruck_start: State = (25.0, 25.0, 0.0),
-        wumpus_start:    Tuple[float, float] = (220.0, 220.0),
-        prm_nodes:       int   = 500,
-        replan_interval: float = 5.0,
-        tick_real_time:  float = 0.05,
-        plot:            bool  = True,
-        sim_duration:    float = 3600.0,
+        grid_num:          int   = 50,
+        cell_size:         float = 5.0,
+        fill_percent:      float = 0.15,
+        firetruck_start:   State = (25.0, 25.0, 0.0),
+        wumpus_start:      Tuple[float, float] = (220.0, 220.0),
+        prm_nodes:         int   = 500,
+        replan_interval:   float = 5.0,
+        tick_real_time:    float = 0.05,
+        plot:              bool  = True,
+        plot_prm:          bool  = False,
+        sim_duration:      float = 3600.0,
+        extinguish_margin: float = 5.0,
+        burn_lifetime:     float = 30.0,
     ):
-        self.replan_interval = replan_interval
-        self.tick_real_time  = tick_real_time
-        self.sim_duration    = sim_duration
-        self.plot            = plot
+        self.replan_interval   = replan_interval
+        self.tick_real_time    = tick_real_time
+        self.sim_duration      = sim_duration
+        self.plot              = plot
+        self.plot_prm          = plot_prm
+        self.extinguish_margin = extinguish_margin
+        self.burn_lifetime     = burn_lifetime
 
         # Internal state
         self._firetruck_path: Optional[List[State]] = None
@@ -108,37 +127,33 @@ class SimulationEngine:
         self._last_goal:        Optional[State]     = None
 
         # Fire targeting — grid cell currently being driven to
-        self._target_fire_cell: Optional[Tuple[int,int]] = None
+        self._target_fire_cell: Optional[Tuple[int, int]] = None
         # Roadmap nodes within this radius of the fire centre are goal candidates
         self.approach_radius: float = 10.0
 
         # Truck state machine
         # Three states:
-        #   "driving"     — path exists, truck is moving toward goal
-        #   "suppressing" — truck arrived, sitting at goal extinguishing fire
-        #   "idle"        — suppression done, needs a new goal and plan
-        self._truck_state: str            = "idle"
-        self._suppress_start: float       = 0.0   # sim_time when suppression began
-        self.suppress_duration: float     = 8.0   # max sim-seconds to wait at goal
+        #   "idle"        — No active path.  Pick the best fire via Euclidean
+        #                   + burn-time triage, plan a path, and transition to
+        #                   "driving".  If planning fails, log and retry.
+        #   "driving"     — Following the Reeds-Shepp path waypoint by waypoint.
+        #                   Arrival is detected when the truck enters
+        #                   approach_radius of the target fire cell centre, or
+        #                   when the path is exhausted.
+        #   "suppressing" — Sitting beside the fire, running proximity timers.
+        self._truck_state: str      = "idle"
+        self._suppress_start: float = 0.0    # sim_time when suppression began
+        self.suppress_duration: float = 8.0  # max sim-seconds to dwell at goal
 
         # Proximity extinguish tracking
-        # Tracks how long each burning cell has been within 10m of the truck.
         # Keys = (row,col) grid cell.  Values = sim_time when proximity started.
-        self._proximity_timers: dict      = {}
-        self.proximity_radius: float      = 10.0  # metres — extinguish range
-        self.proximity_duration: float    = 5.0   # sim-seconds within range to extinguish
+        self._proximity_timers: dict   = {}
+        self.proximity_radius: float   = 10.0  # metres — extinguish range
+        self.proximity_duration: float = 5.0   # sim-seconds within range to extinguish
 
         # Wumpus movement pacing — 1 cell per sim-second = every 10 ticks
-        self._wumpus_tick_counter: int    = 0
-        self.wumpus_move_interval: int    = 10    # ticks between wumpus moves
-
-        # Reverse-escape state
-        # When the planner fails, the truck backs up straight for
-        # reverse_duration sim-seconds then retries planning.
-        self._reversing: bool             = False
-        self._reverse_start: float        = 0.0
-        self.reverse_duration: float      = 2.0   # sim-seconds of reverse
-        self.reverse_speed: float         = 3.0   # m/s backward speed
+        self._wumpus_tick_counter: int = 0
+        self.wumpus_move_interval: int = 10    # ticks between wumpus moves
 
         # ------------------------------------------------------------------
         # Step 1 — Build Map WITHOUT agents (they don't exist yet)
@@ -148,8 +163,8 @@ class SimulationEngine:
             Grid_num       = grid_num,
             cell_size      = cell_size,
             fill_percent   = fill_percent,
-            wumpus         = None,          # patched in step 3
-            firetruck      = None,          # patched in step 3
+            wumpus         = None,   # patched in step 3
+            firetruck      = None,   # patched in step 3
             firetruck_pose = firetruck_start,
             wumpus_pose    = (wumpus_start[0], wumpus_start[1]),
         )
@@ -158,7 +173,7 @@ class SimulationEngine:
         # Step 2 — Build agents (they read map at construction time)
         # ------------------------------------------------------------------
         print("[Engine] Initialising agents...")
-        self.firetruck = Firetruck(self.map, plot=False)
+        self.firetruck = Firetruck(self.map, plot=plot_prm)
         self.wumpus    = Wumpus(self.map)
 
         # ------------------------------------------------------------------
@@ -175,7 +190,7 @@ class SimulationEngine:
         print("[Engine] Roadmap ready.")
 
         # ------------------------------------------------------------------
-        # Step 5 — Visualizer (needs map fully configured)
+        # Step 5 — Simulation visualizer (needs map fully configured)
         # ------------------------------------------------------------------
         self.viz: Optional[SimVisualizer] = None
         if plot:
@@ -195,8 +210,6 @@ class SimulationEngine:
         signals completion.
         """
         print(f"[Engine] Simulation starting (duration={self.sim_duration}s)...")
-
-        # Seed the first goal before the first tick
         self._refresh_goal()
 
         while self.map.sim_time <= self.sim_duration:
@@ -209,17 +222,13 @@ class SimulationEngine:
         """
         Advance the simulation by exactly one tick.
         Returns False when the simulation should stop, True otherwise.
-        Useful for external loops or testing.
 
         The duration check happens AFTER the tick so that the post-tick
         sim_time (updated inside map.main()) is the value tested.
-        Checking before the tick would use the pre-tick time, causing
-        step() to return True one tick past the deadline.
         """
         if self.map.sim_time > self.sim_duration:
             return False
         self._tick()
-        # Re-check after the tick — map.main() advanced sim_time inside
         return self.map.sim_time <= self.sim_duration
 
     # =======================================================================
@@ -232,24 +241,28 @@ class SimulationEngine:
 
         Truck state machine
         -------------------
-        "idle"        — No active path.  If currently reversing, continue
-                        the reverse maneuver; otherwise pick the best fire,
-                        plan a path, and transition to "driving".
-                        If planning fails, start a reverse-escape maneuver
-                        so the truck can free itself from a wall and retry.
-        "driving"     — Path exists, truck is moving forward.  No replanning
-                        mid-journey.  _advance_firetruck() detects arrival
-                        and transitions to "suppressing".
-        "suppressing" — Truck is stationary beside the fire.  Two exit
-                        conditions are checked every tick:
-                          a) A nearby burning cell has been within
-                             proximity_radius for >= proximity_duration
-                             seconds → extinguish it immediately (early exit).
-                          b) The target fire burned out on its own before
-                             the truck could extinguish it → give up and
-                             transition to "idle" to replan.
-                          c) suppress_duration timer expires → run
-                             _finish_suppression() and go idle.
+        "idle"
+            Pick the best reachable fire using Euclidean-distance + burn-time
+            triage (_select_best_fire_goal), then run plan_to_fire().
+            Transition to "driving" if a path is found; otherwise log and
+            retry next tick.  There is no reverse-escape: Reeds-Shepp curves
+            handle any required reversing natively.
+
+        "driving"
+            Follow the Reeds-Shepp path one waypoint per tick.
+            Arrival is detected by _advance_firetruck() when:
+              (a) the truck enters approach_radius of the target fire cell, OR
+              (b) the path is exhausted.
+            On arrival → transition to "suppressing".
+
+        "suppressing"
+            Sit beside the fire.  Exit conditions (checked every tick):
+              (a) Proximity extinguish: a burning cell has been within
+                  proximity_radius for >= proximity_duration seconds
+                  → extinguish it and go idle.
+              (b) Target burned out naturally → go idle.
+              (c) suppress_duration timer expires → _finish_suppression(),
+                  extinguish the 3x3 neighbourhood, go idle.
         """
 
         # 1. Advance sim clock and fire-spread events
@@ -260,56 +273,42 @@ class SimulationEngine:
 
         # 2. Truck state machine
         if self._truck_state == "idle":
-            if self._reversing:
-                # Continue backing up until reverse_duration expires
-                elapsed = self.map.sim_time - self._reverse_start
-                if elapsed < self.reverse_duration:
-                    self._step_reverse()
-                else:
-                    # Reverse complete — stop reversing and try to plan again
-                    self._reversing = False
-                    print(f"[Engine] Reverse complete at t={self.map.sim_time:.1f}s — replanning")
+            self._refresh_goal()
+            self._replan()
+            self._last_replan_time = self.map.sim_time
+            if self._firetruck_path:
+                self._truck_state = "driving"
             else:
-                # Normal idle: pick best goal and plan
-                self._refresh_goal()
-                self._replan()
-                self._last_replan_time = self.map.sim_time
-                if self._firetruck_path:
-                    self._truck_state = "driving"
-                else:
-                    # Planning failed — start reverse-escape maneuver
-                    print(
-                        f"[Engine] Planning failed at t={self.map.sim_time:.1f}s "
-                        f"— starting {self.reverse_duration}s reverse escape"
-                    )
-                    self._reversing      = True
-                    self._reverse_start  = self.map.sim_time
+                print(
+                    f"[Engine] Planning failed at t={self.map.sim_time:.1f}s "
+                    f"— will retry next tick"
+                )
 
         elif self._truck_state == "driving":
             self._advance_firetruck()
 
         elif self._truck_state == "suppressing":
-            # Check proximity extinguish (5s within 10m)
             if self._check_proximity_extinguish():
-                # Fire extinguished early — done
-                self.map.firetruck_goal  = None
-                self._firetruck_path     = None
-                self._proximity_timers   = {}
-                self._truck_state        = "idle"
+                # A nearby cell was extinguished — done with this fire
+                self.map.firetruck_goal = None
+                self._firetruck_path    = None
+                self._proximity_timers  = {}
+                self._target_fire_cell  = None
+                self._truck_state       = "idle"
             else:
-                # Check if the target fire burned out on its own
-                goal = self.map.firetruck_goal
-                if goal and self._target_fire_burned_out(goal):
+                # Check if fire burned out on its own using the cell directly
+                if (self._target_fire_cell is not None and
+                        self._fire_cell_burned_out(self._target_fire_cell)):
                     print(
-                        f"[Engine] Target fire burned out at t={self.map.sim_time:.1f}s "
-                        f"— giving up suppression, replanning"
+                        f"[Engine] Target fire {self._target_fire_cell} burned out "
+                        f"at t={self.map.sim_time:.1f}s — replanning"
                     )
-                    self.map.firetruck_goal  = None
-                    self._firetruck_path     = None
-                    self._proximity_timers   = {}
-                    self._truck_state        = "idle"
+                    self.map.firetruck_goal = None
+                    self._firetruck_path    = None
+                    self._proximity_timers  = {}
+                    self._target_fire_cell  = None
+                    self._truck_state       = "idle"
                 else:
-                    # Check max-dwell timer
                     elapsed = self.map.sim_time - self._suppress_start
                     if elapsed >= self.suppress_duration:
                         self._finish_suppression()
@@ -345,7 +344,7 @@ class SimulationEngine:
           - "ERROR CANT GO HERE"                        <- invalid, discard
           - None                                        <- nothing to do
 
-        2-tuples get theta=0.0 appended so the Dubins planner always
+        2-tuples get theta=0.0 appended so the Reeds-Shepp planner always
         receives a valid State and never raises IndexError on goal[2].
         """
         if not goal or goal == "ERROR CANT GO HERE":
@@ -358,20 +357,18 @@ class SimulationEngine:
         """
         Select the target fire cell (or wumpus fallback) and store it.
 
-        For fires: picks the cheapest-to-reach burning cell via
-        _select_best_fire_goal(), stores the cell on _target_fire_cell
-        so _replan_firetruck knows which fire to drive to.
+        For fires: _select_best_fire_goal() filters by Euclidean reachability
+        and burn-time budget, then returns the closest surviving candidate.
 
-        For wumpus: falls back to a normalised 3-tuple goal as before.
+        For wumpus: normalises the 2-tuple return from find_firetruck_goal().
         """
         if self.map.active_fires:
             self._target_fire_cell = self._select_best_fire_goal()
-            # Store a rough world-metre goal on the map for the visualiser
             if self._target_fire_cell:
-                cs  = self.map.cell_size
-                fc  = self._target_fire_cell
-                gx  = fc[0] * cs + cs / 2.0
-                gy  = fc[1] * cs + cs / 2.0
+                cs = self.map.cell_size
+                fc = self._target_fire_cell
+                gx = fc[0] * cs + cs / 2.0
+                gy = fc[1] * cs + cs / 2.0
                 self.map.update_goal((gx, gy, 0.0))
         else:
             self._target_fire_cell = None
@@ -379,40 +376,94 @@ class SimulationEngine:
             if goal:
                 self.map.update_goal(goal)
 
+    def _fire_remaining_burn_time(self, cell: Tuple[int, int]) -> float:
+        """
+        Return the number of sim-seconds this cell has left before it burns
+        out naturally.
+
+        Uses burn_time recorded in obstacle_coordinate_dict (the sim_time
+        when the cell started burning) and self.burn_lifetime (total burn
+        duration).  Returns 0.0 if the cell is not burning or has no
+        burn_time recorded.
+        """
+        data = self.map.obstacle_coordinate_dict.get(cell)
+        if data is None or data.get("status") != Status.BURNING:
+            return 0.0
+        burn_start = data.get("burn_time")
+        if burn_start is None:
+            return 0.0
+        elapsed = self.map.sim_time - burn_start
+        return max(0.0, self.burn_lifetime - elapsed)
+
     def _select_best_fire_goal(self) -> Optional[Tuple[int, int]]:
         """
-        Rank every active fire by its true driving cost via the roadmap
-        and return the grid cell of the cheapest reachable fire.
+        Choose the best burning cell to target using a fast Euclidean
+        distance + burn-time pre-filter.
 
-        Uses cost_to_fire() which injects only the start node and runs
-        multi-goal A* to any roadmap node within the approach radius —
-        no geometric stop-short computation, no goal node injection.
-        The best approach angle is chosen by the graph automatically.
+        Algorithm
+        ---------
+        For each active fire cell:
+          1. Compute Euclidean distance from the truck to the fire centre.
+          2. Estimate travel time = distance / car.v_max   (optimistic lower bound).
+          3. Time needed at fire  = proximity_duration + extinguish_margin.
+          4. Required budget      = travel_time + time_needed_at_fire.
+          5. Remaining burn time from the Map's burn_time record.
 
-        Returns the (row, col) grid cell of the best fire, or None.
+          Accept the cell only if remaining_burn_time >= required_budget.
+
+        Among all accepted cells, return the one with the smallest
+        Euclidean distance (fastest to reach under the optimistic model).
+
+        If NO cell passes the filter (all fires are too far gone or burn_time
+        is not yet recorded), fall back to the single closest fire so the
+        truck is never left idle when fires still exist.
+
+        This replaces the expensive cost_to_fire() PRM query that was being
+        called for every active fire on every goal refresh tick.
         """
-        pose  = self.map.firetruck_pose
-        start = (float(pose[0]), float(pose[1]), float(pose[2]))
+        pose = self.map.firetruck_pose
+        tx, ty = float(pose[0]), float(pose[1])
+        cs    = self.map.cell_size
+        v_max = self.firetruck.car.v_max
 
-        best_cost: float            = float("inf")
-        best_cell: Optional[Tuple[int,int]] = None
+        # Seconds the truck must spend at the fire once it arrives
+        time_at_fire = self.proximity_duration + self.extinguish_margin
+
+        viable:   list = []   # (distance, cell) — pass the burn-time filter
+        fallback: list = []   # (distance, cell) — all cells regardless
 
         for cell in self.map.active_fires:
-            cost = self.firetruck.cost_to_fire(
-                fire_cell   = cell,
-                start_state = start,
-                radius      = self.approach_radius,
-            )
-            if cost < best_cost:
-                best_cost = cost
-                best_cell = cell
+            cx   = cell[0] * cs + cs / 2.0
+            cy   = cell[1] * cs + cs / 2.0
+            dist = math.hypot(tx - cx, ty - cy)
 
-        if best_cell is not None:
+            travel_time = dist / v_max          # optimistic lower bound
+            required    = travel_time + time_at_fire
+            remaining   = self._fire_remaining_burn_time(cell)
+
+            fallback.append((dist, cell))
+
+            if remaining >= required:
+                viable.append((dist, cell))
+
+        if viable:
+            best_dist, best_cell = min(viable, key=lambda t: t[0])
             print(
-                f"[Engine] Best fire: cell={best_cell} "
-                f"cost={best_cost:.1f}m  t={self.map.sim_time:.1f}s"
+                f"[Engine] Target fire: cell={best_cell} "
+                f"euclid={best_dist:.1f}m  t={self.map.sim_time:.1f}s"
             )
-        return best_cell
+            return best_cell
+
+        # All fires are nearly burned out — go for the closest as fallback
+        if fallback:
+            best_dist, best_cell = min(fallback, key=lambda t: t[0])
+            print(
+                f"[Engine] Fallback fire (no viable): cell={best_cell} "
+                f"euclid={best_dist:.1f}m  t={self.map.sim_time:.1f}s"
+            )
+            return best_cell
+
+        return None
 
     def _goal_has_changed(self) -> bool:
         """
@@ -425,7 +476,6 @@ class SimulationEngine:
             return False
         if current is None or self._last_goal is None:
             return True
-        # Compare x, y positions (ignore heading for change detection)
         return (
             abs(current[0] - self._last_goal[0]) > 1.0 or
             abs(current[1] - self._last_goal[1]) > 1.0
@@ -437,9 +487,9 @@ class SimulationEngine:
 
     def _replan(self) -> None:
         """
-        Recompute both the firetruck and wumpus paths using their
-        respective planners.  Stores results internally; the visualizer
-        reads them on the next update() call.
+        Recompute both the firetruck and wumpus paths.
+        Stores results internally; the visualizer reads them on the next
+        update() call.
         """
         self._replan_firetruck()
         self._replan_wumpus()
@@ -449,14 +499,6 @@ class SimulationEngine:
         """
         Plan a path to the target fire cell using plan_to_fire(), or fall
         back to the single-goal planner for the wumpus-chase case.
-
-        For fires: uses plan_to_fire(fire_cell, radius=approach_radius).
-          - Only injects the start node.
-          - Multi-goal A* finds the cheapest roadmap node near the fire.
-          - No stop-short computation, no geometric goal point.
-
-        For wumpus (no active fire): uses the old plan(goal_state) path
-        which injects both start and goal.
         """
         pose  = self.map.firetruck_pose
         start: State = (float(pose[0]), float(pose[1]), float(pose[2]))
@@ -475,7 +517,6 @@ class SimulationEngine:
                     f"{self._target_fire_cell} at t={self.map.sim_time:.1f}s"
                 )
         else:
-            # Wumpus chase — use original point-goal planner
             goal = self._normalize_goal(self.map.firetruck_goal)
             if goal is None:
                 return
@@ -498,41 +539,57 @@ class SimulationEngine:
 
     def _advance_firetruck(self) -> None:
         """
-        Move the firetruck one waypoint along its current path.
+        Move the firetruck one waypoint along its current Reeds-Shepp path
+        and check for arrival at the target fire cell.
 
-        Arrival detection: when the truck comes within cell_size metres
-        of the goal, it is considered arrived.  Instead of immediately
-        replanning, we transition to "suppressing" and start the timer.
-        The truck stays stationary for suppress_duration sim-seconds
-        before _finish_suppression() is called and state goes to "idle".
+        Arrival is defined as the truck being within approach_radius metres
+        of the target fire cell's world-metre centre.  We intentionally do
+        NOT compare against map.firetruck_goal because the PRM planner
+        routes to a roadmap NODE near the fire centre — the path ends at
+        the node, not at the fire centre itself.  Comparing against the
+        fire cell directly keeps the trigger consistent with plan_to_fire()'s
+        radius parameter and prevents the bounce loop (plan → arrive at
+        roadmap node → not within cell_size of goal → path exhausts → replan
+        to same fire → repeat).
+
+        Exit paths
+        ----------
+        (a) Path exhausted → commit to suppression wherever the truck ended up.
+        (b) Truck enters approach_radius of fire cell → immediate suppression.
         """
         if not self._firetruck_path or len(self._firetruck_path) < 2:
-            # Path exhausted without triggering arrival — go idle so
-            # a fresh plan can be requested next tick.
-            self._truck_state = "idle"
+            # Path exhausted — transition to suppression at current position
+            if self._target_fire_cell is not None:
+                print(
+                    f"[Engine] Path exhausted near fire {self._target_fire_cell} "
+                    f"at t={self.map.sim_time:.1f}s — starting suppression"
+                )
+                self._suppress_start = self.map.sim_time
+                self._truck_state    = "suppressing"
+            else:
+                self._truck_state = "idle"
             return
 
-        # Advance one step
+        # Advance one step along the Reeds-Shepp path
         self._firetruck_path.pop(0)
         next_pose = self._firetruck_path[0]
         self.map.firetruck_pose = next_pose
 
-        # Arrival check
-        goal = self.map.firetruck_goal
-        if goal:
-            dist = math.hypot(
-                next_pose[0] - goal[0],
-                next_pose[1] - goal[1],
-            )
-            if dist < self.map.cell_size:
+        # Arrival check: within approach_radius of the target fire cell centre
+        if self._target_fire_cell is not None:
+            cs  = self.map.cell_size
+            fcx = self._target_fire_cell[0] * cs + cs / 2.0
+            fcy = self._target_fire_cell[1] * cs + cs / 2.0
+            dist = math.hypot(next_pose[0] - fcx, next_pose[1] - fcy)
+            if dist <= self.approach_radius:
                 print(
-                    f"[Engine] Truck arrived at goal {goal} "
-                    f"at t={self.map.sim_time:.1f}s — suppressing for "
-                    f"{self.suppress_duration}s"
+                    f"[Engine] Truck arrived within {dist:.1f}m of fire "
+                    f"{self._target_fire_cell} at t={self.map.sim_time:.1f}s "
+                    f"— suppressing for up to {self.suppress_duration}s"
                 )
                 self._suppress_start = self.map.sim_time
                 self._truck_state    = "suppressing"
-                # Clear the path so the truck sits still during suppression
+                # Freeze path so truck stays put during suppression
                 self._firetruck_path = [next_pose]
 
     def _advance_wumpus(self) -> None:
@@ -546,7 +603,6 @@ class SimulationEngine:
         self._wumpus_path.pop(0)
         next_cell = self._wumpus_path[0]
 
-        # Convert grid cell to world-metre centre
         cs = self.map.cell_size
         wx = next_cell[0] * cs + cs / 2.0
         wy = next_cell[1] * cs + cs / 2.0
@@ -556,41 +612,11 @@ class SimulationEngine:
     # Agent actions
     # =======================================================================
 
-    def _step_reverse(self) -> None:
-        """
-        Move the firetruck straight backward by one tick's worth of distance.
-
-        The truck drives at reverse_speed m/s for reverse_duration sim-seconds.
-        Each tick is 0.1s, so distance per tick = reverse_speed * 0.1.
-
-        Direction is directly opposite the current heading — no steering during
-        reverse so the truck escapes whatever wall it is facing.
-        """
-        pose    = self.map.firetruck_pose
-        x, y, theta_deg = float(pose[0]), float(pose[1]), float(pose[2])
-        theta_rad = math.radians(theta_deg)
-
-        # Move backward along the current heading direction
-        dist = self.reverse_speed * 0.1   # metres this tick (0.1s tick)
-        nx   = x - dist * math.cos(theta_rad)
-        ny   = y - dist * math.sin(theta_rad)
-
-        # Only apply if the new position is collision-free
-        if self.firetruck.cspace.is_free(nx, ny, theta_deg):
-            self.map.firetruck_pose = (nx, ny, theta_deg)
-
     def _check_proximity_extinguish(self) -> bool:
         """
         Check every burning cell within proximity_radius metres of the truck.
-        For each one, track how long it has been within range using
-        _proximity_timers.  If any cell has been within range for
-        >= proximity_duration sim-seconds, extinguish it and return True.
-
-        Returns True if at least one cell was extinguished this tick.
-
-        This replaces the old all-or-nothing 8s dwell timer: the truck
-        now extinguishes fires as soon as it has been close enough for
-        5 sim-seconds, regardless of the max suppress_duration.
+        Track how long each one has been in range via _proximity_timers.
+        If any cell reaches proximity_duration, extinguish it and return True.
         """
         pose = self.map.firetruck_pose
         tx, ty = float(pose[0]), float(pose[1])
@@ -598,28 +624,26 @@ class SimulationEngine:
         now    = self.map.sim_time
         extinguished_any = False
 
-        # Identify all burning cells currently within proximity_radius
         in_range_now: set = set()
         for cell, data in list(self.map.obstacle_coordinate_dict.items()):
             if data["status"] != Status.BURNING:
                 continue
-            # Cell centre in world metres
             cx = cell[0] * cs + cs / 2.0
             cy = cell[1] * cs + cs / 2.0
             if math.hypot(tx - cx, ty - cy) <= self.proximity_radius:
                 in_range_now.add(cell)
 
-        # Update timers — start clock for newly in-range cells,
-        # remove cells that left range
+        # Drop cells that left range
         for cell in list(self._proximity_timers):
             if cell not in in_range_now:
                 del self._proximity_timers[cell]
 
+        # Start clock for newly in-range cells
         for cell in in_range_now:
             if cell not in self._proximity_timers:
-                self._proximity_timers[cell] = now   # start the clock
+                self._proximity_timers[cell] = now
 
-        # Extinguish any cell that has been in range long enough
+        # Extinguish cells that have been in range long enough
         for cell, start_t in list(self._proximity_timers.items()):
             if now - start_t >= self.proximity_duration:
                 data = self.map.obstacle_coordinate_dict.get(cell)
@@ -635,18 +659,23 @@ class SimulationEngine:
 
         return extinguished_any
 
+    def _fire_cell_burned_out(self, cell: Tuple[int, int]) -> bool:
+        """
+        Return True if the target fire cell is no longer BURNING —
+        either burned out naturally or already extinguished.
+        """
+        data = self.map.obstacle_coordinate_dict.get(cell)
+        if data is None:
+            return True
+        return data["status"] != Status.BURNING
+
     def _target_fire_burned_out(self, goal: State) -> bool:
         """
-        Return True if the fire the truck is suppressing has burned out
-        (status BURNED or no longer in active_fires) before being extinguished.
-
-        This is the "give up early" check: if the fire burned itself out
-        naturally during the suppress_duration wait, there is nothing left
-        to extinguish, so the truck should immediately replan to the next fire.
+        Legacy helper: return True if no BURNING cell remains in the
+        3x3 neighbourhood of a world-metre goal position.
+        Kept for test compatibility; prefer _fire_cell_burned_out(cell).
         """
         cs = self.map.cell_size
-        # The goal is parked stop_distance short of the fire cell —
-        # check the 3×3 neighbourhood for any remaining BURNING cell.
         gx = int(goal[0] / cs)
         gy = int(goal[1] / cs)
         for dr in (-1, 0, 1):
@@ -654,21 +683,14 @@ class SimulationEngine:
                 cell = (gx + dr, gy + dc)
                 data = self.map.obstacle_coordinate_dict.get(cell)
                 if data and data["status"] == Status.BURNING:
-                    return False   # fire still alive — keep suppressing
-        # No burning cell found near the goal
+                    return False
         return True
 
     def _finish_suppression(self) -> None:
         """
-        Called when the suppress_duration timer expires.
-
-        Scans the 3×3 neighbourhood around the current truck position for
-        any BURNING obstacles and extinguishes them.  The search radius is
-        intentionally generous because the goal was parked stop_distance
-        short of the fire cell — the fire is adjacent, not directly below.
-
-        After extinguishing, clears the goal so the engine transitions to
-        "idle" and selects the next fire on the following tick.
+        Called when suppress_duration expires.  Extinguishes all BURNING
+        cells in the 3x3 neighbourhood around the truck's current position,
+        then clears the goal so the engine picks a new target next tick.
         """
         pose = self.map.firetruck_pose
         cs   = self.map.cell_size
@@ -692,22 +714,18 @@ class SimulationEngine:
         else:
             print(
                 f"[Engine] Suppression complete at t={self.map.sim_time:.1f}s "
-                f"— no burning cells found nearby (fire may have already burned out)"
+                f"— no burning cells found nearby"
             )
 
-        # Clear goal so idle state picks the next target
         self.map.firetruck_goal = None
         self._firetruck_path    = None
+        self._target_fire_cell  = None
 
     def _wumpus_act(self) -> None:
-        """
-        Let the wumpus burn adjacent obstacles each tick.
-        Delegates to Wumpus.burn() which sets nearby cells to BURNING.
-        """
+        """Let the wumpus burn adjacent obstacles each tick."""
         try:
             self.wumpus.burn()
         except Exception as e:
-            # burn() may fail if wumpus is in an edge cell — log and continue
             print(f"[Engine] Wumpus burn() error: {e}")
 
     # =======================================================================
