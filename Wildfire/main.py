@@ -13,7 +13,7 @@ from pathSimulator import SimulationEngine
 engine = SimulationEngine(
     grid_num        = 50,           # grid cells per side
     cell_size       = 5.0,          # metres per cell
-    fill_percent    = 0.05,         # fraction of cells that are obstacles
+    fill_percent    = 0.1,         # fraction of cells that are obstacles
     firetruck_start = (25.0, 25.0, 0.0),   # (x_m, y_m, theta_deg)
     wumpus_start    = (220.0, 220.0),       # (x_m, y_m)
     prm_nodes       = 500,          # PRM roadmap size
