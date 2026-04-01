@@ -136,22 +136,23 @@ class ConfigurationSpace:
 
     def is_free(self, x: float, y: float, theta_deg: float) -> bool:
         fp = self.car.footprint_at(x, y, theta_deg)
-        # 2. Fast Boundary Check
+    
+        # 1. Boundary check
         if not self._world_box.contains(fp):
             return False
-            
-        # 3. Spatial Query
-        # query() returns indices of obstacles whose BOUNDING BOXES 
-        # intersect the footprint's bounding box.
-        if self.full_obstacle_geometry:
-            possible_matches_indices = self.full_obstacle_geometry.query(fp)
-            
-            # 4. Narrow-phase collision check
-            # Only check actual intersection for the candidates found by the tree
-            for idx in possible_matches_indices:
-                if fp.intersects(self.polys[idx]):
-                    return False
-                
+    
+        # 2. No obstacles at all — world is open
+        if self.full_obstacle_geometry is None:
+            return True
+    
+        # 3. Spatial broad-phase via STRtree bounding-box query
+        possible_matches_indices = self.full_obstacle_geometry.query(fp)
+    
+        # 4. Narrow-phase exact intersection
+        for idx in possible_matches_indices:
+            if fp.intersects(self.polys[idx]):
+                return False
+    
         return True
 
     def is_path_free(self, poses: List[State]) -> bool:
@@ -615,6 +616,7 @@ class Firetruck:
 
     def main_run(self) -> None:
         build_time = time.time()
+        print('started building')
         self.build_tree()
         start_time = time.time()
         print(f"Build time: {start_time - build_time:.4f}s")

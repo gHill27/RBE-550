@@ -54,7 +54,7 @@ _C = {
     "intact":       "#2d5a1b",          # dark forest green
     "burning":      "#e05c00",          # deep orange
     "extinguished": "#3a6b8a",          # slate blue
-    "burned":       "#1a1a1a",          # charcoal
+    "burned":       "#5e5c5c",          # charcoal
     "truck_body":   "#d4a843",          # amber
     "truck_cabin":  "#f0c040",          # bright gold
     "truck_outline":"#ffffff",
@@ -624,4 +624,4 @@ class PlannerVisualizer:
             ax.plot(px, py, color=_C["truck_body"], lw=2, zorder=6)
 
         plt.tight_layout()
-        plt.show()
+        plt.show(block = True)
