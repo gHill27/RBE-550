@@ -106,6 +106,10 @@ class SimulationEngine:
         # Deferred PRM node cleanup: retain last 2 batches of temp-node indices
         # so the truck stays graph-connected when switching goals
         self._pending_cleanup: Deque[List[int]] = deque(maxlen=2)
+        # Thread-safe accumulators for rolling time
+        self._total_truck_replan_time: float = 0.0
+        self._total_wumpus_replan_time: float = 0.0
+        self._timer_lock = threading.Lock()
 
         print("[Engine] Building map...")
         self.map = Map(
@@ -125,9 +129,16 @@ class SimulationEngine:
         self.map.wumpus    = self.wumpus
 
         print(f"[Engine] Building PRM roadmap ({prm_nodes} nodes)...")
+        # Start the rolling timer for the initial tree build
+        start_tree_t = time.perf_counter()
         self.firetruck.build_tree(n_samples=prm_nodes)
-        print("[Engine] Roadmap ready.")
+        duration = time.perf_counter() - start_tree_t
+        with self._timer_lock:
+            # We add this to the truck's rolling replan time 
+            # as it is essentially the "global" plan.
+            self._total_truck_replan_time += duration
 
+        print(f"[Engine] Roadmap ready in {duration:.4f}s.")
         if plot_prm and self.firetruck.viz is not None:
             self.firetruck.viz.plot_prm(
                 self.map, self.firetruck.graph, self.firetruck.nodes, path=None
@@ -187,7 +198,7 @@ class SimulationEngine:
 
         # 2. Wumpus-catch check — inlined for one fewer function call per tick
         ft, wp = self.map.firetruck_pose, self.map.wumpus_pose
-        if math.hypot(ft[0] - wp[0], ft[1] - wp[1]) <= self.wumpus_catch_radius and len(self.map.active_fires) == 0:
+        if math.hypot(ft[0] - wp[0], ft[1] - wp[1]) <= self.wumpus_catch_radius * 2 and len(self.map.active_fires) == 0:
             print(f"[Engine] WUMPUS CAUGHT at t={self.map.sim_time:.1f}s")
             self._end_reason = _END_WUMPUS
             return
@@ -276,7 +287,7 @@ class SimulationEngine:
             )
             if not goal_nodes:
                 goal_nodes = self.firetruck._fire_goal_nodes(
-                    wumpus_cell, radius=self.approach_radius * 3
+                    wumpus_cell, radius=self.approach_radius * 2
                 )
 
             if goal_nodes:
@@ -296,6 +307,7 @@ class SimulationEngine:
             else:
                 # Absolute fallback: no roadmap nodes anywhere near the wumpus,
                 # drive to the raw world-metre pose
+                print('Warning no avaliable spot near wumpus')
                 self.map.update_goal((float(wp[0]), float(wp[1]), 0.0))
 
     def _rank_fire_candidates(self) -> List[Tuple[float, Tuple[int, int]]]:
@@ -385,6 +397,12 @@ class SimulationEngine:
         new_path:     Optional[List[State]] = None
         temp_indices: List[int]             = []
 
+
+        replan_start = time.perf_counter()
+    
+        new_path: Optional[List[State]] = None
+        temp_indices: List[int] = []
+        
         try:
             if target_cell is not None:
                 for cell in candidates:
@@ -404,7 +422,8 @@ class SimulationEngine:
                                 (cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0)
                             )
                         if cell != candidates[0]:
-                            print(f"[BG] Fallback succeeded: planned to fire {cell}")
+                            # print(f"[BG] Fallback succeeded: planned to fire {cell}")
+                            pass 
                         break
                     else:
                         # Inject failed — clean up any orphaned node from this attempt
@@ -429,6 +448,13 @@ class SimulationEngine:
         except Exception as e:
             print(f"[BG] Error: {type(e).__name__}: {e}")
         finally:
+            # 2. Calculate how long THIS specific replan took
+            duration = time.perf_counter() - replan_start
+            
+            # 3. "Roll" it into the total safely
+            with self._timer_lock:
+                self._total_truck_replan_time += duration
+
             with self._path_lock:
                 self._pending_path = new_path
                 if temp_indices:
@@ -512,7 +538,11 @@ class SimulationEngine:
                     print(f"[Engine] Wumpus-chase plan failed at t={self.map.sim_time:.1f}s")
 
     def _replan_wumpus(self) -> None:
+        start_t = time.perf_counter()
         path = self.wumpus.plan()
+        duration = time.perf_counter() - start_t
+        with self._timer_lock:
+            self._total_wumpus_replan_time += duration
         if path is not None:
             self._wumpus_path = path
 
@@ -547,6 +577,7 @@ class SimulationEngine:
                 self._truck_state    = "suppressing"
                 with self._path_lock:
                     self._firetruck_path = [next_pose]
+        
 
     def _advance_wumpus(self) -> None:
         if self._wumpus_path and len(self._wumpus_path) >= 2:
@@ -688,6 +719,9 @@ class SimulationEngine:
         print(f"\n[Engine] ── Final Stats ─────────────────────────")
         print(f"  End    : {labels.get(self._end_reason, self._end_reason)}")
         print(f"  Time   : {self.map.sim_time:.1f}s")
+        print(f"  Rolling Truck Replan Time  : {self._total_truck_replan_time:.4f}s")
+        print(f"  Rolling Wumpus Replan Time : {self._total_wumpus_replan_time:.4f}s")
+
         for k, v in counts.items():
             print(f"  {k:<13}: {v}")
         print("─────────────────────────────────────────────────\n")

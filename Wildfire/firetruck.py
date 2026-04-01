@@ -23,13 +23,14 @@ from typing import Dict, List, Optional, Tuple, TypeAlias
 
 import numpy as np
 from scipy.spatial import KDTree
-from shapely.affinity import rotate, translate
+from shapely.affinity import rotate, translate, affine_transform
 from shapely.geometry import Polygon, box
 from shapely.strtree import STRtree
 
 from rsplan import planner
 from Map_Generator import Map
 from pathVisualizer import PlannerVisualizer
+import time
 
 State: TypeAlias = Tuple[float, float, float]   # (x_m, y_m, theta_deg)
 
@@ -94,10 +95,17 @@ class CarModel:
         ])
 
     def footprint_at(self, x: float, y: float, theta_deg: float) -> Polygon:
-        return translate(
-            rotate(self._footprint, theta_deg, origin=(0, 0), use_radians=False),
-            xoff=x, yoff=y,
-        )
+        angle = math.radians(theta_deg)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        
+        # Define the 2D Affine Matrix: [a, b, d, e, xoff, yoff]
+        # Representing:
+        # x' = a*x + b*y + xoff
+        # y' = d*x + e*y + yoff
+        matrix = [cos_a, -sin_a, sin_a, cos_a, float(x), float(y)]
+        
+        return affine_transform(self._footprint, matrix)
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +199,18 @@ class Firetruck:
 
     def build_tree(self, n_samples: int = 200) -> None:
         print("Sampling free configurations...")
+        t0 = time.perf_counter()
         self._sample_points(n_samples)
+        t1 = time.perf_counter()
+        sample_time = t1 - t0
         print(f"Connecting {len(self.nodes)} nodes...")
         self._connect_nodes()
+        t2 = time.perf_counter()
+        connect_time = t2 - t1
         self._roadmap_size = len(self.nodes)
         n_edges = sum(len(v) for v in self.graph.values())
         print(f"PRM built: {self._roadmap_size} nodes, {n_edges} directed edges")
+        print(f"  [PRM Build] Sampling: {sample_time:.4f}s | Connections: {connect_time:.4f}s")
 
     def _sample_points(self, n_samples: int) -> None:
         limit = self.map.grid_num * self.map.cell_size
