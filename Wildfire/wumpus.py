@@ -30,7 +30,6 @@ from Map_Generator import Map, Status
 class Wumpus:
     def __init__(self, map: Map):
         self.map = map
-        self.pose = self.map.wumpus_pose
         # 8-directional movement (cardinal + diagonal)
         self.directions = [
             (1, 0), (1, 1), (0, 1), (-1, 1),
@@ -139,7 +138,6 @@ class Wumpus:
         cells_to_burn = []
         for dr, dc in self.directions:
             adjacent = (row + dr, col + dc)
-            # BUG FIX 3: obstacle_set is a set, not a callable — no ()
             if adjacent in self.map.obstacle_set:
                 cells_to_burn.append(adjacent)
 
@@ -165,7 +163,6 @@ class Wumpus:
         closest_dist = math.inf
         closest      = None
         for obstacle in self.map.obstacle_set:
-            # Compare in world metres: obstacle cell → its centre
             if self.map.get_status(obstacle) == Status.INTACT:
                 ox   = obstacle[0] * cs + cs / 2.0
                 oy   = obstacle[1] * cs + cs / 2.0
@@ -175,7 +172,3 @@ class Wumpus:
                     closest      = obstacle
 
         return closest
-
-    # Legacy name kept for any callers using calculate_heurisitic (typo)
-    def calculate_heurisitic(self, a: tuple, b: tuple) -> float:
-        return self._heuristic(a, b)

@@ -238,20 +238,35 @@ class Firetruck:
         xy = np.array([(n[0], n[1]) for n in self.nodes])
         self._kd_tree = KDTree(xy)
 
-    def _connect_nodes(self, k_neighbors: int = 30,
-                       r_connect: float = 50.0, step_size: float = 1.0) -> None:
+    def _connect_nodes(self, k: int = 30, r: float = 50.0) -> None:
+        """Connect each node to its k nearest neighbours within radius r."""
         if not self.nodes or self._kd_tree is None:
             return
+        xy = np.array([(n[0], n[1]) for n in self.nodes])
         for i, q_i in enumerate(self.nodes):
-            pos_i     = np.array([q_i[0], q_i[1]])
-            _, k_idxs = self._kd_tree.query(pos_i, k=min(k_neighbors + 1, len(self.nodes)))
-            r_idxs    = self._kd_tree.query_ball_point(pos_i, r=r_connect)
-            candidates = (set(np.atleast_1d(k_idxs).tolist()) | set(r_idxs)) - {i}
-            for j in candidates:
-                poses = self._dubins_poses(q_i, self.nodes[j], step_size)
+            pos = xy[i]
+            # Combined candidate set: k-nearest ∪ radius ball, excluding self
+            _, k_idx = self._kd_tree.query(pos, k=min(k+1, len(self.nodes)))
+            r_idx    = self._kd_tree.query_ball_point(pos, r=r)
+            cands    = (set(k_idx.tolist()) | set(r_idx)) - {i}
+            # Sort by SE(2) distance to try heading-compatible neighbours first
+            cands = sorted(cands, key=lambda j: self._se2_dist(q_i, self.nodes[j]))
+            for j in cands:
+                poses = self._dubins_poses(q_i, self.nodes[j])
                 if poses and self.cspace.is_path_free(poses):
-                    cost = self._dubins_length(q_i, self.nodes[j])
-                    self.graph[i].append({"to": j, "cost": cost, "path": poses})
+                    self.graph[i].append({
+                        "to": j,
+                        "cost": self._dubins_length(q_i, self.nodes[j]),
+                        "path": poses,
+                    })
+                    
+    def _se2_dist(self, q1: State, q2: State) -> float:
+        """SE(2) distance weighting heading by r_min."""
+        dth = abs(q1[2] - q2[2]) % 360
+        if dth > 180: dth = 360 - dth
+        return math.sqrt((q1[0]-q2[0])**2 + (q1[1]-q2[1])**2
+                         + (self.car.r_min * math.radians(dth))**2)
+ 
 
     # ------------------------------------------------------------------
     # QUERY PHASE
@@ -328,46 +343,6 @@ class Firetruck:
 
         return None
 
-    def _astar_multi_goal_cost(
-        self,
-        start_idx: int,
-        goal_set:  set,
-    ) -> float:
-        """
-        Same as _astar_multi_goal but returns only the cost.
-        Used by cost_to_fire() to rank fires without building the path list.
-        """
-        h_cache: Dict[int, float] = {}
-
-        def h(idx: int) -> float:
-            if idx not in h_cache:
-                q_node = self.nodes[idx]
-                h_cache[idx] = min(
-                    self._dubins_length(q_node, self.nodes[g])
-                    for g in goal_set
-                )
-            return h_cache[idx]
-
-        open_set = [(h(start_idx), start_idx)]
-        g_score  = {start_idx: 0.0}
-        visited  = set()
-
-        while open_set:
-            _, current = heapq.heappop(open_set)
-            if current in visited:
-                continue
-            visited.add(current)
-            if current in goal_set:
-                return g_score[current]
-            for edge in self.graph.get(current, []):
-                nbr   = edge["to"]
-                new_g = g_score[current] + edge["cost"]
-                if new_g < g_score.get(nbr, float("inf")):
-                    g_score[nbr] = new_g
-                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
-
-        return float("inf")
-
     def plan_to_fire(
         self,
         fire_cell:   Tuple[int, int],
@@ -414,45 +389,12 @@ class Firetruck:
 
         start_idx = self._inject_query_node(start_state, outgoing=True)
         if start_idx is None:
-            self._cleanup_query_nodes()
             return None
 
         path_indices = self._astar_multi_goal(start_idx, set(goal_nodes))
         waypoints    = self._reconstruct_path(path_indices) if path_indices else None
-        self._cleanup_query_nodes()
         return waypoints
 
-    def cost_to_fire(
-        self,
-        fire_cell:   Tuple[int, int],
-        start_state: Optional[State] = None,
-        radius:      float = 10.0,
-    ) -> float:
-        """
-        Cheapest A* cost (metres) from start_state to any roadmap node
-        within `radius` metres of `fire_cell`.  Only injects start node.
-        Used by the engine to rank fires before committing to a plan.
-        Returns float('inf') if no goal node is reachable.
-        """
-        if self._roadmap_size == 0:
-            return float("inf")
-
-        if start_state is None:
-            fp = self.map.firetruck_pose
-            start_state = (float(fp[0]), float(fp[1]), float(fp[2]))
-
-        goal_nodes = self._fire_goal_nodes(fire_cell, radius)
-        if not goal_nodes:
-            return float("inf")
-
-        start_idx = self._inject_query_node(start_state, outgoing=True)
-        if start_idx is None:
-            self._cleanup_query_nodes()
-            return float("inf")
-
-        cost = self._astar_multi_goal_cost(start_idx, set(goal_nodes))
-        self._cleanup_query_nodes()
-        return cost
 
     def plan(self, goal_state: State,
              start_state: Optional[State] = None) -> Optional[List[State]]:
@@ -480,28 +422,7 @@ class Firetruck:
                 print("plan(): A* found no path through the PRM.")
 
         waypoints = self._reconstruct_path(path_indices) if path_indices else None
-        self._cleanup_query_nodes()
         return waypoints
-
-    def _se2_distance(self, q1: State, q2: State) -> float:
-        """
-        SE(2)-aware distance combining position and heading.
-
-        The KD-tree only indexes (x,y).  Two nodes at the same position
-        but opposite headings are distance-0 in the tree but require a
-        full U-turn in Dubins space.  Adding a heading term weighted by
-        r_min (in metres) gives a unified distance that correctly
-        deprioritises poorly-aligned neighbours.
-
-            d = sqrt(dx² + dy² + (r_min × Δθ_wrapped_rad)²)
-        """
-        dx  = q1[0] - q2[0]
-        dy  = q1[1] - q2[1]
-        dth = abs(q1[2] - q2[2]) % 360
-        if dth > 180:
-            dth = 360 - dth
-        dth_rad = math.radians(dth)
-        return math.sqrt(dx*dx + dy*dy + (self.car.r_min * dth_rad) ** 2)
 
     def _inject_query_node(self, q: State, outgoing: bool,
                            k: int = 10, r: float = 40.0) -> Optional[int]:
@@ -521,7 +442,7 @@ class Firetruck:
 
         # Sort by SE(2) distance — try most heading-compatible nodes first
         candidates = sorted(raw_cands,
-                            key=lambda j: self._se2_distance(q, self.nodes[j]))
+                            key=lambda j: self._se2_dist(q, self.nodes[j]))
 
         connected = False
         for j in candidates:
@@ -535,23 +456,7 @@ class Firetruck:
 
         return idx if connected else None
 
-    def _cleanup_query_nodes(self) -> None:
-        """Truncate temp nodes; no index shifting into permanent roadmap."""
-        if len(self.nodes) <= self._roadmap_size:
-            return
-        temp = set(range(self._roadmap_size, len(self.nodes)))
-        for idx in temp:
-            self.graph.pop(idx, None)
-        for i in range(self._roadmap_size):
-            if i in self.graph:
-                # Rebuild the edge list, filtering out any 'to' that is in temp_indices
-                self.graph[i] = [
-                    edge for edge in self.graph[i]
-                    if edge["to"] < self._roadmap_size
-                ]
-
-        # 4. Truncate the nodes list back to permanent size
-        self.nodes = self.nodes[:self._roadmap_size]
+    
 
     # ------------------------------------------------------------------
     # A* search
@@ -600,15 +505,14 @@ class Firetruck:
     # Path reconstruction
     # ------------------------------------------------------------------
 
-    def _reconstruct_path(self, index_path: List[int]) -> List[State]:
-        if not index_path:
+    def _reconstruct_path(self, idx_path: List[int]) -> List[State]:
+        if not idx_path:
             return []
-        waypoints: List[State] = [self.nodes[index_path[0]]]
-        for k in range(len(index_path) - 1):
-            i, j = index_path[k], index_path[k + 1]
-            edge = next((e for e in self.graph.get(i, []) if e["to"] == j), None)
-            waypoints.extend(edge["path"][1:] if edge else [self.nodes[j]])
-        return waypoints
+        wp: List[State] = [self.nodes[idx_path[0]]]
+        for a, b in zip(idx_path, idx_path[1:]):
+            edge = next((e for e in self.graph.get(a, []) if e["to"] == b), None)
+            wp.extend(edge["path"][1:] if edge else [self.nodes[b]])
+        return wp
 
     # ------------------------------------------------------------------
     # Main loop
