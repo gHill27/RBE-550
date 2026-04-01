@@ -1,13 +1,16 @@
 """
-firetruck_prm.py
-================
-Nonholonomic PRM planner for a firetruck.
+firetruck.py
+============
+Nonholonomic PRM planner for the firetruck using Reeds-Shepp curves (rsplan).
 
-Dubins curves are computed by an inlined pure-Python implementation —
-no external `dubins` package required, works on any Python version.
+Public API
+----------
+  build_tree(n_samples)          — sample + connect the roadmap (one-time)
+  plan_to_fire(fire_cell, ...)   — multi-goal A* to roadmap nodes near a fire
+  plan(goal_state, ...)          — single-goal A* (wumpus chase / point goals)
 
-Public State tuples are (x, y, theta_degrees) throughout.
-The Dubins helpers work internally in radians.
+State tuples are (x_m, y_m, theta_degrees) throughout.
+Reeds-Shepp computations work internally in radians.
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ from __future__ import annotations
 import heapq
 import math
 import random
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, TypeAlias
 
@@ -23,85 +25,68 @@ import numpy as np
 from scipy.spatial import KDTree
 from shapely.affinity import rotate, translate
 from shapely.geometry import Polygon, box
-from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
 from rsplan import planner
-
 from Map_Generator import Map
 from pathVisualizer import PlannerVisualizer
 
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
+State: TypeAlias = Tuple[float, float, float]   # (x_m, y_m, theta_deg)
 
-State:   TypeAlias = Tuple[float, float, float]   # (x, y, theta_degrees)
-Point2D: TypeAlias = Tuple[float, float]
-
-PRM_RANDOM = random.Random()
 
 # ---------------------------------------------------------------------------
-# Reeds-Shepp implementation (via rsplan)
+# Reeds-Shepp wrapper (rsplan)
 # ---------------------------------------------------------------------------
 
-class _ReedsSheppPath:
-    """Wrapper to maintain compatibility with your existing PRM logic."""
-    def __init__(self, q0: Tuple[float, float, float], r: float, q1: Tuple[float, float, float]):
-        self.q0 = q0  # (x, y, theta_rad)
-        self.r = r
-        # rsplan computes the optimal path (shortest distance or fewest segments)
-        # We set a large step_size initially; sampling happens in sample_many()
-        self._path = planner.path(q0, q1, r, 0.0 ,2.0)
+class _RSPath:
+    """Thin wrapper around rsplan.path for length and waypoint sampling."""
+    def __init__(self, q0, q1, r: float):
+        self._path = planner.path(q0, q1, r, 0.0, 2.0)
 
-    def path_length(self) -> float:
-        # Summing segment lengths from the internal rsplan path object
-        return sum(abs(seg.length) for seg in self._path.segments)
+    def length(self) -> float:
+        return sum(abs(s.length) for s in self._path.segments)
 
-    def sample_many(self, step_size: float) -> Tuple[List[Tuple], None]:
-        """Returns (list_of_(x, y, theta_rad), None) to mirror your current API."""
-        # rsplan's waypoints() generates the interpolated states
-        poses = [(w.x, w.y, w.yaw) for w in self._path.waypoints()]
-        return poses, None
+    def poses_deg(self) -> List[State]:
+        """Interpolated (x, y, theta_deg) waypoints."""
+        return [(w.x, w.y, math.degrees(w.yaw)) for w in self._path.waypoints()]
 
-def reeds_shepp_shortest_path(
-    q0: Tuple[float, float, float],
-    q1: Tuple[float, float, float],
-    r: float,
-) -> Optional[_ReedsSheppPath]:
-    """Shortest Reeds-Shepp path from q0 to q1 with turning radius r."""
-    dx, dy = q1[0] - q0[0], q1[1] - q0[1]
-    if math.hypot(dx, dy) < 1e-6 and abs(q0[2] - q1[2]) < 1e-6:
+
+def _rs_path(q_start: State, q_end: State, r: float) -> Optional[_RSPath]:
+    """
+    Return shortest RS path between two (x, y, theta_deg) states, or None
+    when start == end (no movement needed).
+    """
+    q0 = (q_start[0], q_start[1], math.radians(q_start[2]))
+    q1 = (q_end[0],   q_end[1],   math.radians(q_end[2]))
+    if math.hypot(q1[0]-q0[0], q1[1]-q0[1]) < 1e-6 and abs(q0[2]-q1[2]) < 1e-6:
         return None
-    
-    # Return our wrapper object which handles the rsplan logic internally
-    return _ReedsSheppPath(q0, r, q1)
+    return _RSPath(q0, q1, r)
 
-# ===========================================================================
-# CarModel
-# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Car geometry
+# ---------------------------------------------------------------------------
 
 @dataclass
 class CarModel:
     """
-    Geometric and kinematic description of the firetruck.
-    Footprint origin: REAR AXLE centre (+x forward, +y left).
+    Firetruck footprint + kinematic limits.
+    Coordinate origin: rear-axle centre (+x forward, +y left).
     """
     length:         float = 4.9
     width:          float = 2.2
     wheelbase:      float = 3.0
-    r_min:          float = 13.0
-    v_max:          float = 10.0
+    r_min:          float = 13.0    # minimum turning radius (m)
+    v_max:          float = 10.0    # maximum speed (m/s) — used for triage
     front_overhang: Optional[float] = None
     rear_overhang:  Optional[float] = None
 
     def __post_init__(self):
-        overhang = self.length - self.wheelbase
-        if self.front_overhang is None:
-            self.front_overhang = overhang / 2.0
-        if self.rear_overhang is None:
-            self.rear_overhang = overhang / 2.0
+        oh = self.length - self.wheelbase
+        if self.front_overhang is None: self.front_overhang = oh / 2.0
+        if self.rear_overhang  is None: self.rear_overhang  = oh / 2.0
         hw = self.width / 2.0
-        self._local_footprint = Polygon([
+        self._footprint = Polygon([
             (-self.rear_overhang,                   -hw),
             (-self.rear_overhang,                    hw),
             (self.wheelbase + self.front_overhang,   hw),
@@ -109,70 +94,64 @@ class CarModel:
         ])
 
     def footprint_at(self, x: float, y: float, theta_deg: float) -> Polygon:
-        rotated = rotate(self._local_footprint, theta_deg,
-                         origin=(0.0, 0.0), use_radians=False)
-        return translate(rotated, xoff=x, yoff=y)
-
-    def __repr__(self) -> str:
-        return (f"CarModel(length={self.length}m, width={self.width}m, "
-                f"wheelbase={self.wheelbase}m, r_min={self.r_min}m)")
+        return translate(
+            rotate(self._footprint, theta_deg, origin=(0, 0), use_radians=False),
+            xoff=x, yoff=y,
+        )
 
 
-# ===========================================================================
-# ConfigurationSpace
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Configuration space (collision checking)
+# ---------------------------------------------------------------------------
 
 class ConfigurationSpace:
     def __init__(self, car: CarModel, world_size: float,
-                 obstacle_set, cell_size: float = 5.0):
+                 obstacle_set, cell_size: float):
         self.car        = car
         self._world_box = box(0.01, 0.01, world_size, world_size)
-        self.polys = [
-            box(r * cell_size, c * cell_size,
-                r * cell_size + cell_size, c * cell_size + cell_size)
+        self.polys      = [
+            box(r*cell_size, c*cell_size, (r+1)*cell_size, (c+1)*cell_size)
             for r, c in obstacle_set
         ]
-        self.full_obstacle_geometry = STRtree(self.polys) if self.polys else None
+        # STRtree is None when the map has no obstacles (open world)
+        self._tree = STRtree(self.polys) if self.polys else None
 
     def is_free(self, x: float, y: float, theta_deg: float) -> bool:
         fp = self.car.footprint_at(x, y, theta_deg)
-    
-        # 1. Boundary check
         if not self._world_box.contains(fp):
             return False
-    
-        # 2. No obstacles at all — world is open
-        if self.full_obstacle_geometry is None:
+        if self._tree is None:
             return True
-    
-        # 3. Spatial broad-phase via STRtree bounding-box query
-        possible_matches_indices = self.full_obstacle_geometry.query(fp)
-    
-        # 4. Narrow-phase exact intersection
-        for idx in possible_matches_indices:
+        for idx in self._tree.query(fp):
             if fp.intersects(self.polys[idx]):
                 return False
-    
         return True
 
     def is_path_free(self, poses: List[State]) -> bool:
         return all(self.is_free(x, y, th) for x, y, th in poses)
 
 
-# ===========================================================================
-# Firetruck PRM
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# PRM Planner
+# ---------------------------------------------------------------------------
 
 class Firetruck:
-    """PRM planner with Dubins-curve edges (pure-Python, no external dubins lib)."""
+    """
+    Probabilistic Roadmap planner with Reeds-Shepp curve edges.
+
+    Build once with build_tree(), then query repeatedly with plan_to_fire()
+    or plan().  The engine is responsible for deferred cleanup of injected
+    temporary nodes (see simulation_engine._delete_temp_nodes).
+    """
 
     def __init__(self, map: Map, plot: bool = False):
         self.map    = map
         self.car    = CarModel()
-        world_size  = map.grid_num * map.cell_size
         self.cspace = ConfigurationSpace(
-            car=self.car, world_size=world_size,
-            obstacle_set=map.obstacle_set, cell_size=map.cell_size,
+            car=self.car,
+            world_size=map.grid_num * map.cell_size,
+            obstacle_set=map.obstacle_set,
+            cell_size=map.cell_size,
         )
         self.nodes: List[State]           = []
         self.graph: Dict[int, List[dict]] = {}   # edge = {"to", "cost", "path"}
@@ -181,30 +160,33 @@ class Firetruck:
         self.viz = PlannerVisualizer((self.car.width, self.car.length)) if plot else None
 
     # ------------------------------------------------------------------
-    # Reeds-Shepp helpers (updated from Dubins)
+    # Reeds-Shepp helpers
     # ------------------------------------------------------------------
 
-    def _dubins(self, q_start: State, q_end: State) -> Optional[_ReedsSheppPath]:
-        q0 = (q_start[0], q_start[1], math.radians(q_start[2]))
-        q1 = (q_end[0],   q_end[1],   math.radians(q_end[2]))
-        # Renamed internal call to our new Reeds-Shepp wrapper
-        return reeds_shepp_shortest_path(q0, q1, self.car.r_min)
+    def _rs_length(self, q_start: State, q_end: State) -> float:
+        p = _rs_path(q_start, q_end, self.car.r_min)
+        return p.length() if p else float("inf")
 
-    def _dubins_length(self, q_start: State, q_end: State) -> float:
-        path = self._dubins(q_start, q_end)
-        return path.path_length() if path else float("inf")
+    def _rs_poses(self, q_start: State, q_end: State) -> List[State]:
+        """Interpolated (x, y, theta_deg) poses along the RS path."""
+        p = _rs_path(q_start, q_end, self.car.r_min)
+        return p.poses_deg() if p else []
 
-    def _dubins_poses(self, q_start: State, q_end: State,
-                      step_size: float = 1.0) -> List[State]:
-        """Interpolated (x, y, theta_deg) poses along the Reeds-Shepp path."""
-        path = self._dubins(q_start, q_end)
-        if path is None:
-            return []
-        configs, _ = path.sample_many(step_size)
-        return [(x, y, math.degrees(th)) for x, y, th in configs]
+    def _se2_dist(self, q1: State, q2: State) -> float:
+        """
+        SE(2) distance combining position and heading, weighted by r_min.
+        Used to prioritise heading-compatible neighbours during injection,
+        reducing the number of RS paths that fail collision checking.
+        """
+        dth = abs(q1[2] - q2[2]) % 360
+        if dth > 180: dth = 360 - dth
+        return math.sqrt(
+            (q1[0]-q2[0])**2 + (q1[1]-q2[1])**2
+            + (self.car.r_min * math.radians(dth))**2
+        )
 
     # ------------------------------------------------------------------
-    # BUILD PHASE
+    # Build phase
     # ------------------------------------------------------------------
 
     def build_tree(self, n_samples: int = 200) -> None:
@@ -223,9 +205,9 @@ class Firetruck:
 
         while len(self.nodes) < n_samples and attempts < max_att:
             attempts += 1
-            tx     = PRM_RANDOM.uniform(5.0, limit - 5.0)
-            ty     = PRM_RANDOM.uniform(5.0, limit - 5.0)
-            ttheta = PRM_RANDOM.randrange(0, 360, 45)
+            tx     = random.uniform(5.0, limit - 5.0)
+            ty     = random.uniform(5.0, limit - 5.0)
+            ttheta = random.randrange(0, 360, 45)
             if self.cspace.is_free(tx, ty, ttheta):
                 idx = len(self.nodes)
                 self.nodes.append((tx, ty, ttheta))
@@ -239,145 +221,106 @@ class Firetruck:
         self._kd_tree = KDTree(xy)
 
     def _connect_nodes(self, k: int = 30, r: float = 50.0) -> None:
-        """Connect each node to its k nearest neighbours within radius r."""
+        """
+        Connect each node to its k nearest neighbours and all nodes within
+        radius r.  Candidates are sorted by SE(2) distance so heading-
+        compatible edges are attempted first, improving early-exit efficiency.
+        """
         if not self.nodes or self._kd_tree is None:
             return
         xy = np.array([(n[0], n[1]) for n in self.nodes])
         for i, q_i in enumerate(self.nodes):
-            pos = xy[i]
-            # Combined candidate set: k-nearest ∪ radius ball, excluding self
-            _, k_idx = self._kd_tree.query(pos, k=min(k+1, len(self.nodes)))
-            r_idx    = self._kd_tree.query_ball_point(pos, r=r)
-            cands    = (set(k_idx.tolist()) | set(r_idx)) - {i}
-            # Sort by SE(2) distance to try heading-compatible neighbours first
-            cands = sorted(cands, key=lambda j: self._se2_dist(q_i, self.nodes[j]))
+            _, k_idx = self._kd_tree.query(xy[i], k=min(k+1, len(self.nodes)))
+            r_idx    = self._kd_tree.query_ball_point(xy[i], r=r)
+            cands    = sorted(
+                (set(k_idx.tolist()) | set(r_idx)) - {i},
+                key=lambda j: self._se2_dist(q_i, self.nodes[j]),
+            )
             for j in cands:
-                poses = self._dubins_poses(q_i, self.nodes[j])
+                poses = self._rs_poses(q_i, self.nodes[j])
                 if poses and self.cspace.is_path_free(poses):
                     self.graph[i].append({
-                        "to": j,
-                        "cost": self._dubins_length(q_i, self.nodes[j]),
+                        "to":   j,
+                        "cost": self._rs_length(q_i, self.nodes[j]),
                         "path": poses,
                     })
-                    
-    def _se2_dist(self, q1: State, q2: State) -> float:
-        """SE(2) distance weighting heading by r_min."""
-        dth = abs(q1[2] - q2[2]) % 360
-        if dth > 180: dth = 360 - dth
-        return math.sqrt((q1[0]-q2[0])**2 + (q1[1]-q2[1])**2
-                         + (self.car.r_min * math.radians(dth))**2)
- 
 
     # ------------------------------------------------------------------
-    # QUERY PHASE
+    # Query helpers
     # ------------------------------------------------------------------
 
     def _fire_goal_nodes(self, fire_cell: Tuple[int, int],
                          radius: float = 10.0) -> List[int]:
         """
-        Return indices of all roadmap nodes whose (x,y) position lies
-        within `radius` metres of the centre of `fire_cell`.
-
-        These nodes are used directly as goal candidates in plan_to_fire()
-        without any injection — every one already has full graph connectivity
-        from build time, so no new Dubins solves are needed on the goal side.
+        Return indices of permanent roadmap nodes within `radius` metres of
+        the centre of `fire_cell`.  These nodes require no injection — they
+        already have full graph connectivity from build time.
         """
-        cs  = self.map.cell_size
-        cx  = fire_cell[0] * cs + cs / 2.0
-        cy  = fire_cell[1] * cs + cs / 2.0
-        pos = np.array([cx, cy])
-        idxs = self._kd_tree.query_ball_point(pos, r=radius)
-        return [i for i in idxs if i < self._roadmap_size]
+        cs = self.map.cell_size
+        cx = fire_cell[0] * cs + cs / 2.0
+        cy = fire_cell[1] * cs + cs / 2.0
+        return [i for i in self._kd_tree.query_ball_point([cx, cy], r=radius)
+                if i < self._roadmap_size]
 
-    def _astar_multi_goal(
-        self,
-        start_idx: int,
-        goal_set:  set,
-    ) -> Optional[List[int]]:
+    def _inject_node(self, q: State, outgoing: bool,
+                     k: int = 10, r: float = 40.0) -> Optional[int]:
         """
-        A* search that terminates at the CHEAPEST member of goal_set.
+        Temporarily add q to the graph.
+          outgoing=True  → edges q → neighbours  (start node)
+          outgoing=False → edges neighbours → q   (goal node)
 
-        Unlike single-goal A*, there is no single q_goal to compute a
-        heuristic against.  We use the minimum Dubins distance to any
-        goal node as the heuristic — this remains admissible because the
-        true cost to reach the goal set is at least as large as the
-        cheapest free-space arc to the nearest goal.
-
-        The search pops nodes in order of f = g + h.  The first time any
-        goal node is popped it is guaranteed to be the cheapest reachable
-        goal (A* optimality).
+        Returns the new node index on success, None if no connection found.
+        The engine is responsible for removing injected nodes via
+        _delete_temp_nodes when they are no longer needed.
         """
-        # Precompute heuristic: min Dubins distance from node to any goal
-        h_cache: Dict[int, float] = {}
+        idx = len(self.nodes)
+        self.nodes.append(q)
+        self.graph[idx] = []
 
-        def h(idx: int) -> float:
-            if idx not in h_cache:
-                q_node = self.nodes[idx]
-                h_cache[idx] = min(
-                    self._dubins_length(q_node, self.nodes[g])
-                    for g in goal_set
-                )
-            return h_cache[idx]
+        pos   = np.array([q[0], q[1]])
+        n_q   = min(k*3, self._roadmap_size)
+        if n_q == 0:
+            return None
 
-        open_set  = [(h(start_idx), start_idx)]
-        g_score   = {start_idx: 0.0}
-        came_from: Dict[int, int] = {}
-        visited   = set()
+        _, k_idx = self._kd_tree.query(pos, k=n_q)
+        r_idx    = self._kd_tree.query_ball_point(pos, r=r)
+        cands    = sorted(
+            {c for c in (set(k_idx.tolist()) | set(r_idx)) if c < self._roadmap_size},
+            key=lambda j: self._se2_dist(q, self.nodes[j]),
+        )
 
-        while open_set:
-            _, current = heapq.heappop(open_set)
-            if current in visited:
-                continue
-            visited.add(current)
+        connected = False
+        for j in cands:
+            q_src, q_dst = (q, self.nodes[j]) if outgoing else (self.nodes[j], q)
+            src, dst     = (idx, j)            if outgoing else (j, idx)
+            poses = self._rs_poses(q_src, q_dst)
+            if poses and self.cspace.is_path_free(poses):
+                self.graph[src].append({
+                    "to":   dst,
+                    "cost": self._rs_length(q_src, q_dst),
+                    "path": poses,
+                })
+                connected = True
 
-            if current in goal_set:
-                return self._unwind(came_from, current)
+        return idx if connected else None
 
-            for edge in self.graph.get(current, []):
-                nbr   = edge["to"]
-                new_g = g_score[current] + edge["cost"]
-                if new_g < g_score.get(nbr, float("inf")):
-                    g_score[nbr]   = new_g
-                    came_from[nbr] = current
-                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
+    # ------------------------------------------------------------------
+    # Public planners
+    # ------------------------------------------------------------------
 
-        return None
-
-    def plan_to_fire(
-        self,
-        fire_cell:   Tuple[int, int],
-        start_state: Optional[State] = None,
-        radius:      float = 10.0,
-    ) -> Optional[List[State]]:
+    def plan_to_fire(self, fire_cell: Tuple[int, int],
+                     start_state: Optional[State] = None,
+                     radius: float = 10.0) -> Optional[List[State]]:
         """
-        Plan from start_state to the cheapest roadmap node within `radius`
-        metres of `fire_cell`, injecting only the start node.
+        Multi-goal A* from start_state to the cheapest permanent roadmap
+        node within `radius` metres of fire_cell.
 
-        Why no goal injection
-        ---------------------
-        The old plan(goal_state) approach:
-          1. Computed a geometric stop-short point along the truck→fire vector.
-          2. Injected it as a temp goal node, trying Dubins connections to
-             the roadmap.
-          3. Ran single-goal A* to that one point.
-
-        Problem: the stop-short point was computed from the current truck
-        position, so it always picked the face of the obstacle closest to
-        where the truck currently is — not the face that is cheapest to
-        actually reach via the road network.  A fire behind a wall cluster
-        would produce a goal on the near side that required a long detour,
-        when the far side was directly reachable via an existing corridor.
-
-        This method instead:
-          1. Finds all roadmap nodes already within `radius` metres of the
-             fire centre (KD-tree lookup, no Dubins solves).
-          2. Injects only the start node (half the Dubins overhead).
-          3. Runs multi-goal A* — terminates at whichever goal node is
-             cheapest via the existing graph.  The graph chooses the best
-             approach angle automatically.
+        Only the start node is injected (no goal injection needed — goal
+        candidates are permanent nodes with full graph connectivity).
+        The caller (engine) owns cleanup of the injected start node.
         """
         if self._roadmap_size == 0:
-            raise RuntimeError("Call build_tree() before plan_to_fire().")
+            raise RuntimeError("Call build_tree() first.")
 
         if start_state is None:
             fp = self.map.firetruck_pose
@@ -387,125 +330,119 @@ class Firetruck:
         if not goal_nodes:
             return None
 
-        start_idx = self._inject_query_node(start_state, outgoing=True)
+        start_idx = self._inject_node(start_state, outgoing=True)
         if start_idx is None:
+            # Could not connect — remove the orphaned node
+            self.nodes.pop()
+            self.graph.pop(len(self.nodes), None)
             return None
 
-        path_indices = self._astar_multi_goal(start_idx, set(goal_nodes))
-        waypoints    = self._reconstruct_path(path_indices) if path_indices else None
-        return waypoints
-
+        idx_path = self._astar_multi(start_idx, set(goal_nodes))
+        return self._build_waypoints(idx_path) if idx_path else None
 
     def plan(self, goal_state: State,
              start_state: Optional[State] = None) -> Optional[List[State]]:
         """
-        Single-goal planner — kept for wumpus chase and precise targets.
-        Injects both start and goal as temp nodes.
+        Single-goal A* for precise targets (wumpus roadmap node).
+        Injects both start and goal nodes.  Caller owns cleanup.
         """
         if self._roadmap_size == 0:
-            raise RuntimeError("Call build_tree() before plan().")
+            raise RuntimeError("Call build_tree() first.")
         if start_state is None:
             fp = self.map.firetruck_pose
             start_state = (float(fp[0]), float(fp[1]), 0.0)
 
-        start_idx = self._inject_query_node(start_state, outgoing=True)
-        goal_idx  = self._inject_query_node(goal_state,  outgoing=False)
+        start_idx = self._inject_node(start_state, outgoing=True)
+        goal_idx  = self._inject_node(goal_state,  outgoing=False)
 
-        path_indices = None
-        if start_idx is None:
-            print("plan(): could not connect start pose to PRM.")
-        elif goal_idx is None:
-            print("plan(): could not connect goal pose to PRM.")
-        else:
-            path_indices = self._astar(start_idx, goal_idx)
-            if path_indices is None:
-                print("plan(): A* found no path through the PRM.")
-
-        waypoints = self._reconstruct_path(path_indices) if path_indices else None
-        return waypoints
-
-    def _inject_query_node(self, q: State, outgoing: bool,
-                           k: int = 10, r: float = 40.0) -> Optional[int]:
-        idx = len(self.nodes)
-        self.nodes.append(q)
-        self.graph[idx] = []
-
-        pos     = np.array([q[0], q[1]])
-        n_query = min(k * 3, self._roadmap_size)
-        if n_query == 0:
+        if start_idx is None or goal_idx is None:
+            print("plan(): could not connect start or goal to PRM.")
             return None
 
-        _, k_idxs = self._kd_tree.query(pos, k=n_query)
-        r_idxs    = self._kd_tree.query_ball_point(pos, r=r)
-        raw_cands = (set(np.atleast_1d(k_idxs).tolist()) | set(r_idxs)) - {idx}
-        raw_cands = {c for c in raw_cands if c < self._roadmap_size}
-
-        # Sort by SE(2) distance — try most heading-compatible nodes first
-        candidates = sorted(raw_cands,
-                            key=lambda j: self._se2_dist(q, self.nodes[j]))
-
-        connected = False
-        for j in candidates:
-            q_src, q_dst = (q, self.nodes[j]) if outgoing else (self.nodes[j], q)
-            src,   dst   = (idx, j)            if outgoing else (j, idx)
-            poses = self._dubins_poses(q_src, q_dst)
-            if poses and self.cspace.is_path_free(poses):
-                cost = self._dubins_length(q_src, q_dst)
-                self.graph[src].append({"to": dst, "cost": cost, "path": poses})
-                connected = True
-
-        return idx if connected else None
-
-    
+        idx_path = self._astar_single(start_idx, goal_idx)
+        if idx_path is None:
+            print("plan(): A* found no path.")
+        return self._build_waypoints(idx_path) if idx_path else None
 
     # ------------------------------------------------------------------
     # A* search
     # ------------------------------------------------------------------
 
-    def _astar(self, start_idx: int, goal_idx: int) -> Optional[List[int]]:
-        q_goal   = self.nodes[goal_idx]
+    def _astar_multi(self, start: int, goals: set) -> Optional[List[int]]:
+        """
+        A* to the cheapest reachable goal in `goals`.
+        Heuristic: min RS-length from current node to any goal.
+        Admissible because RS-length ≤ true graph path cost.
+        Results are cached per node to avoid recomputing across expansions.
+        """
         h_cache: Dict[int, float] = {}
 
         def h(idx: int) -> float:
             if idx not in h_cache:
-                h_cache[idx] = self._dubins_length(self.nodes[idx], q_goal)
+                q = self.nodes[idx]
+                h_cache[idx] = min(self._rs_length(q, self.nodes[g]) for g in goals)
             return h_cache[idx]
 
-        open_set  = [(h(start_idx), start_idx)]
-        g_score   = {start_idx: 0.0}
+        open_set  = [(h(start), start)]
+        g_score   = {start: 0.0}
         came_from: Dict[int, int] = {}
-        visited   = set()
+        visited:   set            = set()
 
         while open_set:
-            _, current = heapq.heappop(open_set)
-            if current in visited:
+            _, cur = heapq.heappop(open_set)
+            if cur in visited:
                 continue
-            visited.add(current)
-            if current == goal_idx:
-                return self._unwind(came_from, current)
-            for edge in self.graph.get(current, []):
-                nbr   = edge["to"]
-                new_g = g_score[current] + edge["cost"]
-                if new_g < g_score.get(nbr, float("inf")):
-                    g_score[nbr]   = new_g
-                    came_from[nbr] = current
-                    heapq.heappush(open_set, (new_g + h(nbr), nbr))
+            visited.add(cur)
+            if cur in goals:
+                return self._unwind(came_from, cur)
+            for e in self.graph.get(cur, []):
+                nb, ng = e["to"], g_score[cur] + e["cost"]
+                if ng < g_score.get(nb, float("inf")):
+                    g_score[nb]   = ng
+                    came_from[nb] = cur
+                    heapq.heappush(open_set, (ng + h(nb), nb))
+        return None
+
+    def _astar_single(self, start: int, goal: int) -> Optional[List[int]]:
+        """Standard A* to a single goal node."""
+        q_goal    = self.nodes[goal]
+        h_cache: Dict[int, float] = {}
+
+        def h(idx: int) -> float:
+            if idx not in h_cache:
+                h_cache[idx] = self._rs_length(self.nodes[idx], q_goal)
+            return h_cache[idx]
+
+        open_set  = [(h(start), start)]
+        g_score   = {start: 0.0}
+        came_from: Dict[int, int] = {}
+        visited:   set            = set()
+
+        while open_set:
+            _, cur = heapq.heappop(open_set)
+            if cur in visited:
+                continue
+            visited.add(cur)
+            if cur == goal:
+                return self._unwind(came_from, cur)
+            for e in self.graph.get(cur, []):
+                nb, ng = e["to"], g_score[cur] + e["cost"]
+                if ng < g_score.get(nb, float("inf")):
+                    g_score[nb]   = ng
+                    came_from[nb] = cur
+                    heapq.heappush(open_set, (ng + h(nb), nb))
         return None
 
     @staticmethod
-    def _unwind(came_from: Dict[int, int], current: int) -> List[int]:
+    def _unwind(came_from: Dict[int, int], cur: int) -> List[int]:
         path = []
-        while current in came_from:
-            path.append(current)
-            current = came_from[current]
-        path.append(current)
+        while cur in came_from:
+            path.append(cur)
+            cur = came_from[cur]
+        path.append(cur)
         return path[::-1]
 
-    # ------------------------------------------------------------------
-    # Path reconstruction
-    # ------------------------------------------------------------------
-
-    def _reconstruct_path(self, idx_path: List[int]) -> List[State]:
+    def _build_waypoints(self, idx_path: List[int]) -> List[State]:
         if not idx_path:
             return []
         wp: List[State] = [self.nodes[idx_path[0]]]
@@ -513,20 +450,3 @@ class Firetruck:
             edge = next((e for e in self.graph.get(a, []) if e["to"] == b), None)
             wp.extend(edge["path"][1:] if edge else [self.nodes[b]])
         return wp
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-
-    def main_run(self) -> None:
-        build_time = time.time()
-        print('started building')
-        self.build_tree()
-        start_time = time.time()
-        print(f"Build time: {start_time - build_time:.4f}s")
-        goal = (40.0, 40.0, 45.0)
-        path = self.plan(goal)
-        print(f"Query time: {time.time() - start_time:.4f}s")
-        if self.viz:
-            self.viz.plot_prm(self.map, self.graph, self.nodes, path=path)
-        print(f"Path found: {len(path)} waypoints." if path else "No path found.")
