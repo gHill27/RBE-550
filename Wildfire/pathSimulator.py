@@ -45,7 +45,7 @@ import math
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional, Set, Tuple
+from typing import Deque, List, Optional, Set, Tuple, Dict
 from dataclasses import dataclass
 
 from Map_Generator import Map, Status
@@ -237,18 +237,37 @@ class SimulationEngine:
     def get_stats(self, run_index: int = 0) -> RunResult:
         """
         Collect end-of-run statistics into a RunResult.
-        Safe to call at any time; does not modify engine state.
+ 
+        Scoring uses self._firetruck_extinguished (the live counter) for
+        firetruck_points, NOT the map-scan EXTINGUISHED count.  The map
+        scan is used only for the informational extinguished field so the
+        summary can cross-check the two values.
+ 
+        If _firetruck_extinguished != counts["EXTINGUISHED"] at end of run,
+        a warning is printed — this would indicate a counting bug.
         """
-        counts: dict[str, int] = {s.name: 0 for s in Status}
+        counts: Dict[str, int] = {s.name: 0 for s in Status}
         for data in self.map.obstacle_coordinate_dict.values():
             counts[data["status"].name] += 1
  
-        extinguished  = counts["EXTINGUISHED"]
-        burned        = counts["BURNED"]
-        fires_started = self._wumpus_fires_started
+        map_extinguished = counts["EXTINGUISHED"]
+        burned           = counts["BURNED"]
+        fires_started    = self._wumpus_fires_started
  
-        ft_pts = self._firetruck_extinguished * 2
-        wu_pts = fires_started + burned
+        # Use the live counter for scoring — it tracks every extinguish call
+        # made by the engine regardless of timing.
+        ft_counter = self._firetruck_extinguished
+        if ft_counter != map_extinguished:
+            print(
+                f"[Engine] WARNING: _firetruck_extinguished={ft_counter} "
+                f"but map EXTINGUISHED count={map_extinguished}. "
+                f"Using live counter for scoring."
+            )
+ 
+        # Read CPU totals under lock to avoid torn-float reads
+        with self._timer_lock:
+            ft_cpu = self.firetruck_cpu_time
+            wu_cpu = self.wumpus_cpu_time
  
         return RunResult(
             run_index          = run_index,
@@ -256,13 +275,13 @@ class SimulationEngine:
             sim_time           = round(self.map.sim_time, 1),
             intact             = counts["INTACT"],
             burned             = burned,
-            extinguished       = extinguished,
+            extinguished       = map_extinguished,   # for display / cross-check
             still_burning      = counts["BURNING"],
-            firetruck_points   = ft_pts,
-            wumpus_points      = wu_pts,
+            firetruck_points   = ft_counter * 2,     # live counter × 2
+            wumpus_points      = fires_started + burned,
             fires_started      = fires_started,
-            firetruck_cpu_time = self.firetruck_cpu_time,
-            wumpus_cpu_time    = self.wumpus_cpu_time,
+            firetruck_cpu_time = ft_cpu,
+            wumpus_cpu_time    = wu_cpu,
         )
 
     # =======================================================================
