@@ -9,16 +9,29 @@ Run with:
 """
 
 from pathSimulator import SimulationEngine
+from tourney import run_tournament, summarise,plot_results
 
-engine = SimulationEngine(
-    grid_num        = 50,           # grid cells per side
-    cell_size       = 5.0,          # metres per cell
-    fill_percent    = 0.1,         # fraction of cells that are obstacles
-    firetruck_start = (25.0, 25.0, 0.0),   # (x_m, y_m, theta_deg)
-    wumpus_start    = (220.0, 220.0),       # (x_m, y_m)
-    prm_nodes       = 500,          # PRM roadmap size
-    tick_real_time  = 0.005,         # wall-clock seconds per tick
-    plot            = False,
-    sim_duration    = 3600.0,       # 1 hour of sim time
+
+
+args = dict(
+    grid_num              = 50,
+    cell_size             = 5.0,
+    fill_percent          = 0.10,
+    firetruck_start       = (25.0, 25.0, 0.0),
+    wumpus_start          = (220.0, 220.0),
+    prm_nodes             = 400,
+    tick_real_time        = 0.0,
+    display_every_n_ticks = 5,
+    plot                  = True,      # set True to watch the sim
+    plot_prm              = False,
+    sim_duration          = 3600.0,
+    wumpus_catch_radius   = 6.0,
+    flood_fill_radius     = 4,
+    extinguish_margin     = 5.0,
+    burn_lifetime         = 30.0,
 )
-engine.run()
+
+if __name__ == "__main__":
+    results = run_tournament(n_runs=3, **args)
+    summarise(results)
+    plot_results(results)

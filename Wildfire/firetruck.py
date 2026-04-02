@@ -11,6 +11,29 @@ Public API
 
 State tuples are (x_m, y_m, theta_degrees) throughout.
 Reeds-Shepp computations work internally in radians.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          AI USAGE DISCLOSURE                             ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Tool      : Claude (Anthropic) — claude-sonnet-4-6                      ║
+║  Role      : Debugging and Refactor partner                              ║
+║  Scope     : Partially AI-assisted (original logic is human-authored)    ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Contributions                                                           ║
+║  ─ Designed the switch from Dubins curves to Reeds-Shepp curves via      ║
+║    rsplan, including the _RSPath wrapper class and _rs_path() helper.    ║
+║  ─ Designed ConfigurationSpace with STRtree broad-phase + Shapely        ║
+║    narrow-phase collision checking and the None-guard for empty maps.    ║
+║  ─ Designed plan_to_fire() multi-goal A* without goal injection:         ║
+║    permanent roadmap nodes near the fire are used directly, halving      ║
+║    Reeds-Shepp solve overhead vs the previous inject-both approach.      ║
+║  ─ Implemented SE(2) distance weighting for neighbour prioritisation     ║
+║    (_se2_dist) to reduce collision-check failures during injection.      ║
+║  ─ Unified _astar_multi and _astar_single (previously four separate      ║
+║    A* variants) and added per-node heuristic caching (h_cache dict).     ║
+║  ─ Removed cost_to_fire(), _astar_multi_goal_cost(), _cleanup_query_     ║
+║    nodes(), main_run(), and other dead code (≈200 lines eliminated).     ║
+╠══════════════════════════════════════════════════════════════════════════╣
 """
 
 from __future__ import annotations

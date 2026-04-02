@@ -2,6 +2,30 @@
 Map_Generator.py
 ================
 World state: obstacle grid, fire spread, and goal management.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          AI USAGE DISCLOSURE                             ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Tool      : Claude (Anthropic) — claude-sonnet-4-6                      ║
+║  Role      : Refactoring, bug-fixing, and performance partner            ║
+║  Scope     : Partially AI-assisted (original logic is human-authored)    ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Contributions                                                           ║
+║  ─ Fixed three bugs in the original check_time_events():                 ║
+║      • find_burnable_obstacles() called without the required coordinate  ║
+║        argument, causing TypeError at t≈4.9s on every run.               ║
+║      • set_status_on_obstacles() called with a bare tuple instead of     ║
+║        [coordinate], silently skipping the BURNED transition.            ║
+║      • Removed the list() copy on obstacle_coordinate_dict.items()       ║
+║        (safe because keys are not added/removed during iteration).       ║
+║  ─ Rewrote set_status_on_obstacles() as a clean state-machine:           ║
+║    EXTINGUISHED/BURNED are terminal; active_fires uses discard().        ║
+║  ─ Collapsed eight map-generation helpers into two (_generate_safe_map,  ║
+║    _random_tetromino), eliminating the N²-alloc generate_random_coord    ║
+║    and the never-terminating find_neighbor_obstacles (Queue bug).        ║
+║  ─ Fixed find_firetruck_goal() to convert grid cells to world metres     ║
+║    (coord * cell_size + cell_size/2) rather than using raw indices.      ║
+╠══════════════════════════════════════════════════════════════════════════╣
 """
 
 from __future__ import annotations

@@ -26,7 +26,25 @@ Usage
 
 Call viz.update() as fast as your sim loop runs; matplotlib's
 non-blocking draw (pause(0.001)) keeps the window responsive.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          AI USAGE DISCLOSURE                             ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Tool      : Claude (Anthropic) — claude-sonnet-4-6                      ║
+║  Role      : Implementation and debugging partner                        ║
+║  Scope     : Partially AI-assisted                                       ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Contributions                                                           ║
+║  ─ Advised on matplotlib animation structure (FuncAnimation vs manual    ║
+║    canvas flush) for smooth real-time updates without blocking.          ║
+║  ─ Suggested PlannerVisualizer.plot_prm() signature                      ║
+║    (map, graph, nodes, path=None) to allow the engine to trigger PRM     ║
+║    debug rendering after build_tree() with a single call.                ║
+║  ─ Recommended drawing PRM edges as LineCollection for O(edges) render   ║
+║    instead of one plt.plot call per edge.                                ║
+╠══════════════════════════════════════════════════════════════════════════╣
 """
+
 
 from __future__ import annotations
 

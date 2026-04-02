@@ -12,6 +12,31 @@ Architecture
   truck stays graph-connected while switching targets
 - Display is throttled to every N ticks for higher throughput
 - Wumpus goal targets the closest PRM roadmap node to the wumpus position
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          AI USAGE DISCLOSURE                             ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Tool      : Claude (Anthropic) — claude-sonnet-4-6                      ║
+║  Role      : Implementation partner                                      ║
+║  Scope     : Partially AI-assisted (original logic is human-authored)    ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Contributions                                                           ║
+║  ─ Designed and implemented the three-state truck state machine          ║
+║    (idle → driving → suppressing) and all state transitions.             ║
+║  ─ Authored the Euclidean + burn-time fire-triage algorithm              ║
+║    (_rank_fire_candidates) that replaced an expensive PRM-cost loop.     ║
+║  ─ Designed and implemented the background replanning architecture:      ║
+║    daemon thread, _path_lock double-buffer, _swap_pending_path.          ║
+║  ─ Designed the deferred PRM-node cleanup system (_pending_cleanup       ║
+║    deque, _delete_temp_nodes) that fixed the graph-disconnection bug.    ║
+║  ─ Implemented the scoring system (RunResult dataclass, get_stats(),     ║
+║    _firetruck_extinguished / _wumpus_fires_started counters).            ║
+║  ─ Identified and fixed the zero-points scoring bug: get_stats() was     ║
+║    using the map-scan EXTINGUISHED count instead of the live counter,    ║
+║    and the CPU-time accumulators lacked _timer_lock protection.          ║
+║  ─ Authored the wumpus-catch condition, flood-fill extinguish,           ║
+║    proximity timer logic, and display throttle mechanism.                ║
+╠══════════════════════════════════════════════════════════════════════════╣
 """
 
 from __future__ import annotations
@@ -21,6 +46,7 @@ import threading
 import time
 from collections import deque
 from typing import Deque, List, Optional, Set, Tuple
+from dataclasses import dataclass
 
 from Map_Generator import Map, Status
 from firetruck import Firetruck
@@ -33,6 +59,36 @@ _END_TIME   = "time_limit"
 _END_WUMPUS = "wumpus_caught"
 _END_MAP    = "map_done"
 
+@dataclass
+class RunResult:
+    """All statistics produced by a single simulation run."""
+    run_index:           int
+    end_reason:          str
+    sim_time:            float
+ 
+    # Obstacle counts at end of run
+    intact:              int
+    burned:              int        # burned out naturally — wumpus earns these
+    extinguished:        int        # put out by firetruck — firetruck earns these
+    still_burning:       int
+ 
+    # Scoring
+    firetruck_points:    int        # 2 pts × extinguished
+    wumpus_points:       int        # 1 pt × fires_started + 1 pt × burned
+    fires_started:       int        # total ignition events by wumpus
+ 
+    # CPU time (seconds of wall-clock spent in each planner)
+    firetruck_cpu_time:  float
+    wumpus_cpu_time:     float
+ 
+    # Derived
+    @property
+    def winner(self) -> str:
+        if self.firetruck_points > self.wumpus_points:
+            return "Firetruck"
+        if self.wumpus_points > self.firetruck_points:
+            return "Wumpus"
+        return "Draw"
 
 class SimulationEngine:
     """
@@ -63,8 +119,8 @@ class SimulationEngine:
         display_every_n_ticks: int   = 5,
         plot:                  bool  = True,
         plot_prm:              bool  = False,
-        sim_duration:          float = 300.0,
-        wumpus_catch_radius:   float = 5.0,
+        sim_duration:          float = 3600.0,
+        wumpus_catch_radius:   float = 10.0,
         flood_fill_radius:     int   = 4,
         extinguish_margin:     float = 5.0,
         burn_lifetime:         float = 30.0,
@@ -106,9 +162,14 @@ class SimulationEngine:
         # Deferred PRM node cleanup: retain last 2 batches of temp-node indices
         # so the truck stays graph-connected when switching goals
         self._pending_cleanup: Deque[List[int]] = deque(maxlen=2)
+        
         # Thread-safe accumulators for rolling time
-        self._total_truck_replan_time: float = 0.0
-        self._total_wumpus_replan_time: float = 0.0
+
+        self._firetruck_extinguished: int = 0   # cells the truck put out
+        self._wumpus_fires_started:   int = 0   # ignition events by wumpus
+ 
+        self.firetruck_cpu_time: float = 0.0
+        self.wumpus_cpu_time:    float = 0.0
         self._timer_lock = threading.Lock()
 
         print("[Engine] Building map...")
@@ -134,9 +195,7 @@ class SimulationEngine:
         self.firetruck.build_tree(n_samples=prm_nodes)
         duration = time.perf_counter() - start_tree_t
         with self._timer_lock:
-            # We add this to the truck's rolling replan time 
-            # as it is essentially the "global" plan.
-            self._total_truck_replan_time += duration
+            self.firetruck_cpu_time += duration
 
         print(f"[Engine] Roadmap ready in {duration:.4f}s.")
         if plot_prm and self.firetruck.viz is not None:
@@ -154,21 +213,57 @@ class SimulationEngine:
     # Public API
     # =======================================================================
 
-    def run(self) -> None:
-        print(f"[Engine] Starting — duration={self.sim_duration}s, "
+    def run(self, run_index: int = 0) -> RunResult:
+        """
+        Run the full simulation and return a RunResult with all statistics.
+        """
+        print(f"[Engine] Starting run {run_index} — "
+              f"duration={self.sim_duration}s, "
               f"display_every={self.display_every_n_ticks} ticks")
         self._refresh_goal()
         while self.map.sim_time <= self.sim_duration and self._end_reason is None:
             self._tick()
-        print(f"[Engine] Ended at t={self.map.sim_time:.1f}s "
-              f"[{self._end_reason or _END_TIME}]")
+        result = self.get_stats(run_index)
+        self._print_run_summary(result)
         self._shutdown()
+        return result
 
     def step(self) -> bool:
         if self.map.sim_time > self.sim_duration or self._end_reason is not None:
             return False
         self._tick()
         return self.map.sim_time <= self.sim_duration and self._end_reason is None
+    
+    def get_stats(self, run_index: int = 0) -> RunResult:
+        """
+        Collect end-of-run statistics into a RunResult.
+        Safe to call at any time; does not modify engine state.
+        """
+        counts: dict[str, int] = {s.name: 0 for s in Status}
+        for data in self.map.obstacle_coordinate_dict.values():
+            counts[data["status"].name] += 1
+ 
+        extinguished  = counts["EXTINGUISHED"]
+        burned        = counts["BURNED"]
+        fires_started = self._wumpus_fires_started
+ 
+        ft_pts = self._firetruck_extinguished * 2
+        wu_pts = fires_started + burned
+ 
+        return RunResult(
+            run_index          = run_index,
+            end_reason         = self._end_reason or _END_TIME,
+            sim_time           = round(self.map.sim_time, 1),
+            intact             = counts["INTACT"],
+            burned             = burned,
+            extinguished       = extinguished,
+            still_burning      = counts["BURNING"],
+            firetruck_points   = ft_pts,
+            wumpus_points      = wu_pts,
+            fires_started      = fires_started,
+            firetruck_cpu_time = self.firetruck_cpu_time,
+            wumpus_cpu_time    = self.wumpus_cpu_time,
+        )
 
     # =======================================================================
     # Core tick
@@ -396,13 +491,8 @@ class SimulationEngine:
         """
         new_path:     Optional[List[State]] = None
         temp_indices: List[int]             = []
-
-
         replan_start = time.perf_counter()
-    
-        new_path: Optional[List[State]] = None
-        temp_indices: List[int] = []
-        
+            
         try:
             if target_cell is not None:
                 for cell in candidates:
@@ -431,7 +521,7 @@ class SimulationEngine:
                         if len(self.firetruck.nodes) > nodes_before:
                             orphan = list(range(nodes_before, len(self.firetruck.nodes)))
                             self._delete_temp_nodes(orphan)
-                        print(f"[BG] plan_to_fire failed for {cell}")
+                        # print(f"[BG] plan_to_fire failed for {cell}")
 
                 if new_path is None:
                     print(f"[BG] All {len(candidates)} candidates unreachable")
@@ -453,7 +543,7 @@ class SimulationEngine:
             
             # 3. "Roll" it into the total safely
             with self._timer_lock:
-                self._total_truck_replan_time += duration
+                self.firetruck_cpu_time += duration
 
             with self._path_lock:
                 self._pending_path = new_path
@@ -542,7 +632,7 @@ class SimulationEngine:
         path = self.wumpus.plan()
         duration = time.perf_counter() - start_t
         with self._timer_lock:
-            self._total_wumpus_replan_time += duration
+            self.wumpus_cpu_time += duration
         if path is not None:
             self._wumpus_path = path
 
@@ -624,6 +714,7 @@ class SimulationEngine:
             if now - start_t >= self.proximity_duration:
                 data = self.map.obstacle_coordinate_dict.get(cell)
                 if data and data["status"] == Status.BURNING:
+                    self._firetruck_extinguished += 1 #score
                     self.map.set_status_on_obstacles([cell], Status.EXTINGUISHED)
                     print(f"[Engine] Extinguish {cell} after {now-start_t:.1f}s "
                           f"at t={now:.1f}s")
@@ -646,6 +737,7 @@ class SimulationEngine:
                 visited.add(nb)
                 data = self.map.obstacle_coordinate_dict.get(nb)
                 if data and data["status"] == Status.BURNING:
+                    self._firetruck_extinguished += 1
                     self.map.set_status_on_obstacles([nb], Status.EXTINGUISHED)
                     queue.append((nb, depth + 1))
 
@@ -660,6 +752,7 @@ class SimulationEngine:
                 cell = (cx+dr, cy+dc)
                 data = self.map.obstacle_coordinate_dict.get(cell)
                 if data and data["status"] == Status.BURNING:
+                    self._firetruck_extinguished += 1
                     self.map.set_status_on_obstacles([cell], Status.EXTINGUISHED)
                     extinguished.append(cell)
         if extinguished:
@@ -688,7 +781,11 @@ class SimulationEngine:
         except Exception as e:
             print(f"[Engine] Wumpus burn() error: {e}")
             return False
-        return len(self.map.active_fires) > before
+        new_fires = len(self.map.active_fires) - before
+        if new_fires:
+            self._wumpus_fires_started += new_fires
+            return True
+        return False
 
     # =======================================================================
     # Utilities
@@ -706,24 +803,29 @@ class SimulationEngine:
     # Shutdown
     # =======================================================================
 
-    def _shutdown(self) -> None:
-        counts = {s.name: 0 for s in Status}
-        for data in self.map.obstacle_coordinate_dict.values():
-            counts[data["status"].name] += 1
+    def _print_run_summary(self, result: RunResult) -> None:
         labels = {
             _END_TIME:   "Time limit (5 min)",
             _END_WUMPUS: "Wumpus caught",
             _END_MAP:    "Map complete",
-            None:        "Unknown",
         }
-        print(f"\n[Engine] ── Final Stats ─────────────────────────")
-        print(f"  End    : {labels.get(self._end_reason, self._end_reason)}")
-        print(f"  Time   : {self.map.sim_time:.1f}s")
-        print(f"  Rolling Truck Replan Time  : {self._total_truck_replan_time:.4f}s")
-        print(f"  Rolling Wumpus Replan Time : {self._total_wumpus_replan_time:.4f}s")
-
-        for k, v in counts.items():
-            print(f"  {k:<13}: {v}")
+        print(f"\n[Engine] ── Run {result.run_index} Summary ─────────────────")
+        print(f"  End reason   : {labels.get(result.end_reason, result.end_reason)}")
+        print(f"  Sim time     : {result.sim_time:.1f}s")
+        print(f"  Intact       : {result.intact}")
+        print(f"  Burned out   : {result.burned}")
+        print(f"  Extinguished : {result.extinguished}")
+        print(f"  Still burning: {result.still_burning}")
+        print(f"  Fires started: {result.fires_started}")
+        print(f"  FT points    : {result.firetruck_points}  "
+              f"({result.extinguished} × 2)")
+        print(f"  WU points    : {result.wumpus_points}  "
+              f"({result.fires_started} fires + {result.burned} burned)")
+        print(f"  FT CPU time  : {result.firetruck_cpu_time:.3f}s")
+        print(f"  WU CPU time  : {result.wumpus_cpu_time:.3f}s")
+        print(f"  Run winner   : {result.winner}")
         print("─────────────────────────────────────────────────\n")
+ 
+    def _shutdown(self) -> None:
         if self.viz:
             self.viz.close()
