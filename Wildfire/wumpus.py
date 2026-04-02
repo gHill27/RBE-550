@@ -32,8 +32,7 @@ class Wumpus:
         self.map = map
         # 8-directional movement (cardinal + diagonal)
         self.directions = [
-            (1, 0), (1, 1), (0, 1), (-1, 1),
-            (-1, -1), (1, -1), (-1, 0), (0, -1),
+            (1, 0), (0, 1), (-1, 0), (0, -1),
         ]
 
     # ------------------------------------------------------------------
@@ -87,7 +86,7 @@ class Wumpus:
 
                 # BUG FIX 1: bounds check — without this the search expands
                 # into negative/infinite grid indices, looping forever.
-                if not self._in_bounds(neighbour):
+                if not self._in_bounds(neighbour) or neighbour in self.map.obstacle_set:
                     continue
 
                 tentative_g = cost_so_far[current] + 1.0
@@ -170,5 +169,23 @@ class Wumpus:
                 if dist < closest_dist:
                     closest_dist = dist
                     closest      = obstacle
+        
+        goal = None
+        if closest:
+            distance = math.inf     
+            for direction in self.directions:
+                dx, dy =  direction
+                cx, cy = closest
+                test_goal = (cx + dx , cy + dy)
 
-        return closest
+                #obstacle check
+                if test_goal in self.map.obstacle_set:
+                    continue
+
+                #distance check
+                dist = math.dist(test_goal,(self.map.wumpus_pose[0],self.map.wumpus_pose[1]))
+                if dist < distance:
+                    distance = dist
+                    goal = test_goal
+
+        return goal

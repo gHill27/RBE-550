@@ -157,7 +157,7 @@ class SimulationEngine:
 
         # Start at 0 so the first wumpus move happens after wumpus_move_interval ticks
         self._wumpus_tick_counter: int = 0
-        self.wumpus_move_interval: int = 10
+        self.wumpus_move_interval: int = 7
 
         # Deferred PRM node cleanup: retain last 2 batches of temp-node indices
         # so the truck stays graph-connected when switching goals
@@ -220,12 +220,24 @@ class SimulationEngine:
         print(f"[Engine] Starting run {run_index} — "
               f"duration={self.sim_duration}s, "
               f"display_every={self.display_every_n_ticks} ticks")
-        self._refresh_goal()
-        while self.map.sim_time <= self.sim_duration and self._end_reason is None:
-            self._tick()
-        result = self.get_stats(run_index)
-        self._print_run_summary(result)
-        self._shutdown()
+        try:
+            self._refresh_goal()
+            while self.map.sim_time <= self.sim_duration and self._end_reason is None:
+                self._tick()
+            result = self.get_stats(run_index)
+            self._print_run_summary(result)
+            self._shutdown()
+            
+        except KeyboardInterrupt:
+            print("\n[Engine] STOPPED BY CTRL C, cleaning")
+            self._end_reason = 'user_interupt'
+        finally:
+            # This block runs regardless of whether the sim finished 
+            # naturally or was interrupted.
+            result = self.get_stats(run_index)
+            self._print_run_summary(result)
+            self._shutdown()
+            
         return result
 
     def step(self) -> bool:
@@ -316,6 +328,11 @@ class SimulationEngine:
             print(f"[Engine] WUMPUS CAUGHT at t={self.map.sim_time:.1f}s")
             self._end_reason = _END_WUMPUS
             return
+
+        while self._replan_pending:
+            # We use a tiny sleep to prevent this loop from hitting 100% CPU usage
+            # while waiting for the other thread to join.
+            time.sleep(0.01)
 
         # 3. Pick up any path the background thread just finished
         self._swap_pending_path()
