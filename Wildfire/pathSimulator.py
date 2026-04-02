@@ -224,9 +224,6 @@ class SimulationEngine:
             self._refresh_goal()
             while self.map.sim_time <= self.sim_duration and self._end_reason is None:
                 self._tick()
-            result = self.get_stats(run_index)
-            self._print_run_summary(result)
-            self._shutdown()
             
         except KeyboardInterrupt:
             print("\n[Engine] STOPPED BY CTRL C, cleaning")
@@ -237,7 +234,7 @@ class SimulationEngine:
             result = self.get_stats(run_index)
             self._print_run_summary(result)
             self._shutdown()
-            
+
         return result
 
     def step(self) -> bool:
@@ -547,9 +544,6 @@ class SimulationEngine:
                             self.map.update_goal(
                                 (cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0)
                             )
-                        if cell != candidates[0]:
-                            # print(f"[BG] Fallback succeeded: planned to fire {cell}")
-                            pass 
                         break
                     else:
                         # Inject failed — clean up any orphaned node from this attempt
@@ -557,10 +551,6 @@ class SimulationEngine:
                         if len(self.firetruck.nodes) > nodes_before:
                             orphan = list(range(nodes_before, len(self.firetruck.nodes)))
                             self._delete_temp_nodes(orphan)
-                        # print(f"[BG] plan_to_fire failed for {cell}")
-
-                if new_path is None:
-                    print(f"[BG] All {len(candidates)} candidates unreachable")
 
             elif goal_state is not None:
                 path = self.firetruck.plan(goal_state=goal_state, start_state=start)
@@ -568,8 +558,6 @@ class SimulationEngine:
                     new_path     = path
                     temp_indices = list(range(self.firetruck._roadmap_size,
                                              len(self.firetruck.nodes)))
-                else:
-                    print("[BG] Wumpus-chase plan failed")
 
         except Exception as e:
             print(f"[BG] Error: {type(e).__name__}: {e}")
@@ -652,8 +640,8 @@ class SimulationEngine:
                     cs = self.map.cell_size
                     self.map.update_goal((cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0))
                     return
-                print(f"[Engine] plan_to_fire failed for {cell}")
-            print("[Engine] All candidates unreachable (sync replan)")
+                # print(f"[Engine] plan_to_fire failed for {cell}")
+            # print("[Engine] All candidates unreachable (sync replan)")
         else:
             goal = self._normalize_goal(self.map.firetruck_goal)
             if goal:
@@ -697,8 +685,8 @@ class SimulationEngine:
             r, c = self._target_fire_cell
             if math.hypot(next_pose[0] - (r*cs + cs/2),
                           next_pose[1] - (c*cs + cs/2)) <= self.approach_radius:
-                print(f"[Engine] Arrived at fire {self._target_fire_cell} "
-                      f"at t={self.map.sim_time:.1f}s — suppressing")
+                # print(f"[Engine] Arrived at fire {self._target_fire_cell} "
+                    #   f"at t={self.map.sim_time:.1f}s — suppressing")
                 self._suppress_start = self.map.sim_time
                 self._truck_state    = "suppressing"
                 with self._path_lock:
@@ -706,6 +694,7 @@ class SimulationEngine:
         
 
     def _advance_wumpus(self) -> None:
+        start_t = time.perf_counter()
         if self._wumpus_path and len(self._wumpus_path) >= 2:
             self._wumpus_path.pop(0)
             r, c = self._wumpus_path[0]
@@ -714,6 +703,9 @@ class SimulationEngine:
         else:
             # PATH EXHAUSTED: Replan even if no new fire was lit
             self._replan_wumpus()
+        duration = time.perf_counter() - start_t         
+        with self._timer_lock:                            
+            self.wumpus_cpu_time += duration              
 
     # =======================================================================
     # Fire suppression
@@ -752,8 +744,8 @@ class SimulationEngine:
                 if data and data["status"] == Status.BURNING:
                     self._firetruck_extinguished += 1 #score
                     self.map.set_status_on_obstacles([cell], Status.EXTINGUISHED)
-                    print(f"[Engine] Extinguish {cell} after {now-start_t:.1f}s "
-                          f"at t={now:.1f}s")
+                    # print(f"[Engine] Extinguish {cell} after {now-start_t:.1f}s "
+                        #   f"at t={now:.1f}s")
                     extinguished.add(cell)
                 del self._proximity_timers[cell]
 
@@ -812,11 +804,16 @@ class SimulationEngine:
     def _wumpus_act(self) -> bool:
         """Burn adjacent obstacles; return True if new fires were lit."""
         before = len(self.map.active_fires)
+        start_t = time.perf_counter()   
         try:
             self.wumpus.burn()
         except Exception as e:
             print(f"[Engine] Wumpus burn() error: {e}")
             return False
+        finally:
+            duration = time.perf_counter() - start_t    
+            with self._timer_lock:                       
+                self.wumpus_cpu_time += duration         
         new_fires = len(self.map.active_fires) - before
         if new_fires:
             self._wumpus_fires_started += new_fires
@@ -857,11 +854,11 @@ class SimulationEngine:
               f"({result.extinguished} × 2)")
         print(f"  WU points    : {result.wumpus_points}  "
               f"({result.fires_started} fires + {result.burned} burned)")
-        print(f"  FT CPU time  : {result.firetruck_cpu_time:.3f}s")
-        print(f"  WU CPU time  : {result.wumpus_cpu_time:.3f}s")
+        print(f"  FT CPU time  : {result.firetruck_cpu_time:.4f}s")
+        print(f"  WU CPU time  : {result.wumpus_cpu_time:.4f}s")
         print(f"  Run winner   : {result.winner}")
         print("─────────────────────────────────────────────────\n")
  
     def _shutdown(self) -> None:
         if self.viz:
-            self.viz.close()
+            self.viz.close(reason=self._end_reason or "time_limit")

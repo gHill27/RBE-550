@@ -191,8 +191,8 @@ def _print_trophy(winner: str, ft_pts: int, wu_pts: int, margin: int) -> None:
 # Charts
 # ===========================================================================
 
-_FT_COLOR  = "#e05c33"    # firetruck orange-red
-_WU_COLOR  = "#4a90d9"    # wumpus blue
+_WU_COLOR  = "#e05c33"    # firetruck orange-red
+_FT_COLOR  = "#4a90d9"    # wumpus blue
 _BAR_WIDTH = 0.32
 
 
@@ -228,7 +228,7 @@ def plot_results(results: List[RunResult]) -> None:
     # Annotate total CPU times above the chart
     ax_cpu.text(
         0.5, 1.06,
-        f"Totals — FT: {sum(ft_cpu):.2f}s  |  WU: {sum(wu_cpu):.2f}s",
+        f"Totals — FT: {sum(ft_cpu):.3f}s  |  WU: {sum(wu_cpu):.3f}s",
         ha="center", va="bottom", transform=ax_cpu.transAxes,
         fontsize=9, color="gray",
     )

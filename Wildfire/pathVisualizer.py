@@ -291,9 +291,12 @@ class SimVisualizer:
         self._fig.canvas.draw_idle()
         plt.pause(0.001)
 
-    def close(self):
-        plt.ioff()
-        plt.show()   # keep window open when sim ends
+    def close(self, reason: str = "time_limit") -> None:
+        if reason == "wumpus_caught":
+            self.show_end_screen(reason)
+        else:
+            plt.ioff()
+            plt.show()
 
     # ------------------------------------------------------------------
     # Drawing helpers
@@ -578,6 +581,61 @@ class SimVisualizer:
                 fontsize=7,
                 ha="center", va="bottom",
             )
+    
+    def show_end_screen(self, reason: str = "wumpus_caught") -> None:
+        """
+        Overlay a full-canvas end screen, pause for 1 second, then close.
+        Call this instead of close() when the sim ends with a notable result.
+        """
+        ax = self._ax
+
+        # Semi-transparent dark overlay
+        overlay = mpatches.Rectangle(
+            (0, 0), self._world, self._world,
+            facecolor="#0d0d0f",
+            alpha=0.82,
+            zorder=20,
+            transform=ax.transData,
+        )
+        ax.add_patch(overlay)
+
+        cx = self._world / 2
+        cy = self._world / 2
+
+        if reason == "wumpus_caught":
+            headline = "🚒  WUMPUS CAUGHT!"
+            subline  = "Firetruck wins this round"
+            color    = _C["truck_body"]       # amber
+        elif reason == "time_limit":
+            headline = "⏱  TIME LIMIT REACHED"
+            subline  = "Simulation complete"
+            color    = _C["text_primary"]
+        else:
+            headline = "✅  SIMULATION COMPLETE"
+            subline  = reason
+            color    = _C["text_primary"]
+
+        ax.text(
+            cx, cy + self._world * 0.07,
+            headline,
+            color=color,
+            fontsize=22,
+            fontweight="bold",
+            ha="center", va="center",
+            zorder=21,
+        )
+        ax.text(
+            cx, cy - self._world * 0.04,
+            subline,
+            color=_C["text_dim"],
+            fontsize=13,
+            ha="center", va="center",
+            zorder=21,
+        )
+
+        self._fig.canvas.draw()
+        plt.pause(1.0)      # display for 1 second then continue
+        plt.close(self._fig)
 
 
 # ===========================================================================
@@ -643,3 +701,4 @@ class PlannerVisualizer:
 
         plt.tight_layout()
         plt.show(block = True)
+
