@@ -157,7 +157,7 @@ class SimulationEngine:
 
         # Start at 0 so the first wumpus move happens after wumpus_move_interval ticks
         self._wumpus_tick_counter: int = 0
-        self.wumpus_move_interval: int = 7
+        self.wumpus_move_interval: int = 6
 
         # Deferred PRM node cleanup: retain last 2 batches of temp-node indices
         # so the truck stays graph-connected when switching goals
@@ -326,10 +326,14 @@ class SimulationEngine:
             self._end_reason = _END_WUMPUS
             return
 
-        while self._replan_pending:
-            # We use a tiny sleep to prevent this loop from hitting 100% CPU usage
-            # while waiting for the other thread to join.
+        if self._replan_pending:
+            # We still allow the visualizer to refresh so the UI doesn't hang
+            if self.viz and self._tick_counter % self.display_every_n_ticks == 0:
+                with self._path_lock:
+                    display_path = list(self._firetruck_path) if self._firetruck_path else None
+                self.viz.update(display_path, self._wumpus_path)
             time.sleep(0.01)
+            return
 
         # 3. Pick up any path the background thread just finished
         self._swap_pending_path()
@@ -366,7 +370,8 @@ class SimulationEngine:
             self._wumpus_tick_counter = 0
 
         # 6. Wumpus burns; replan immediately if new fires were lit
-        if self._wumpus_act():
+        new_fires = self._wumpus_act()
+        if new_fires or not self._wumpus_path:
             self._replan_wumpus()
 
         # 7. Display (throttled)
@@ -395,7 +400,8 @@ class SimulationEngine:
             if self._target_fire_cell:
                 cs  = self.map.cell_size
                 r, c = self._target_fire_cell
-                self.map.update_goal((r*cs + cs/2, c*cs + cs/2, 0.0))
+                with self._path_lock:
+                    self.map.update_goal((r*cs + cs/2, c*cs + cs/2, 0.0))
         else:
             self._target_fire_cell = None
             self._fire_candidates  = []
@@ -411,12 +417,8 @@ class SimulationEngine:
             # same approach_radius used for fire goals; fall back to a wider
             # search radius if none are found close enough.
             goal_nodes = self.firetruck._fire_goal_nodes(
-                wumpus_cell, radius=self.approach_radius
+                wumpus_cell, radius=self.approach_radius * 2
             )
-            if not goal_nodes:
-                goal_nodes = self.firetruck._fire_goal_nodes(
-                    wumpus_cell, radius=self.approach_radius * 2
-                )
 
             if goal_nodes:
                 # _fire_goal_nodes returns indices from a ball query — order is
@@ -539,11 +541,7 @@ class SimulationEngine:
                         temp_indices = list(range(self.firetruck._roadmap_size,
                                                   len(self.firetruck.nodes)))
                         with self._path_lock:
-                            self._target_fire_cell = cell
-                            cs = self.map.cell_size
-                            self.map.update_goal(
-                                (cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0)
-                            )
+                            self._pending_target_cell = cell
                         break
                     else:
                         # Inject failed — clean up any orphaned node from this attempt
@@ -568,9 +566,10 @@ class SimulationEngine:
             # 3. "Roll" it into the total safely
             with self._timer_lock:
                 self.firetruck_cpu_time += duration
-
+            
             with self._path_lock:
                 self._pending_path = new_path
+                self._pending_target_cell = target_cell
                 if temp_indices:
                     self._pending_cleanup.append(temp_indices)
                 self._replan_pending = False
@@ -619,11 +618,19 @@ class SimulationEngine:
         }
 
     def _swap_pending_path(self) -> None:
-        """Atomically move a background-thread result into active use."""
+        """Atomically move results into active use (Main Thread Only)."""
         with self._path_lock:
-            if self._pending_path is not None:
+            if not self._replan_pending and self._pending_path is not None:
                 self._firetruck_path = self._pending_path
-                self._pending_path   = None
+                
+                # Update map goals here, in the main thread
+                if hasattr(self, '_pending_target_cell') and self._pending_target_cell:
+                    cs = self.map.cell_size
+                    r, c = self._pending_target_cell
+                    self.map.update_goal((r*cs + cs/2, c*cs + cs/2, 0.0))
+                
+                self._pending_path = None
+                self._pending_target_cell = None
 
     # Synchronous replan — used by tests and non-threaded contexts
     def _replan_firetruck(self) -> None:
@@ -635,10 +642,11 @@ class SimulationEngine:
                     fire_cell=cell, start_state=start, radius=self.approach_radius
                 )
                 if path:
-                    self._firetruck_path   = path
-                    self._target_fire_cell = cell
-                    cs = self.map.cell_size
-                    self.map.update_goal((cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0))
+                    with self._path_lock:
+                        self._firetruck_path   = path
+                        self._target_fire_cell = cell
+                        cs = self.map.cell_size
+                        self.map.update_goal((cell[0]*cs + cs/2, cell[1]*cs + cs/2, 0.0))
                     return
                 # print(f"[Engine] plan_to_fire failed for {cell}")
             # print("[Engine] All candidates unreachable (sync replan)")
@@ -647,7 +655,8 @@ class SimulationEngine:
             if goal:
                 path = self.firetruck.plan(goal_state=goal, start_state=start)
                 if path:
-                    self._firetruck_path = path
+                    with self._path_lock:
+                        self._firetruck_path = path
                 else:
                     print(f"[Engine] Wumpus-chase plan failed at t={self.map.sim_time:.1f}s")
 
@@ -795,10 +804,11 @@ class SimulationEngine:
 
     def _clear_goal(self) -> None:
         """Reset truck to idle and clear all goal/path state."""
-        self.map.firetruck_goal = None
-        self._firetruck_path    = None
+        with self._path_lock:
+            self.map.firetruck_goal = None
+            self._firetruck_path    = None
+            self._target_fire_cell  = None
         self._proximity_timers  = {}
-        self._target_fire_cell  = None
         self._truck_state       = "idle"
 
     def _wumpus_act(self) -> bool:
@@ -860,5 +870,11 @@ class SimulationEngine:
         print("─────────────────────────────────────────────────\n")
  
     def _shutdown(self) -> None:
+        # Wait for any in-flight background replan to finish before
+        # destroying Tkinter objects — prevents "main thread is not in main loop"
+        timeout = time.perf_counter() + 5.0
+        while self._replan_pending and time.perf_counter() < timeout:
+            time.sleep(0.05)
+
         if self.viz:
             self.viz.close(reason=self._end_reason or "time_limit")

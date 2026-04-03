@@ -58,6 +58,7 @@ import matplotlib.transforms as transforms
 import numpy as np
 from matplotlib.patches import FancyArrowPatch, Polygon, RegularPolygon
 from matplotlib.lines import Line2D
+import threading
 
 # Use a non-blocking backend that works both in scripts and notebooks.
 matplotlib.use("TkAgg")   # swap to "Qt5Agg" if TkAgg is unavailable
@@ -280,6 +281,12 @@ class SimVisualizer:
         firetruck_path : list of (x_m, y_m, theta_deg) or None
         wumpus_path    : list of (row, col) grid tuples or None
         """
+        if threading.current_thread() is not threading.main_thread():
+            self._fig.canvas.get_tk_widget().after(
+                0, lambda: self.update(firetruck_path, wumpus_path)
+            )
+            return
+
         self._draw_obstacles()
         self._draw_truck_path(firetruck_path)
         self._draw_wumpus_path(wumpus_path)
@@ -292,6 +299,10 @@ class SimVisualizer:
         plt.pause(0.001)
 
     def close(self, reason: str = "time_limit") -> None:
+        if threading.current_thread() is not threading.main_thread():
+            # Schedule closure on main thread instead of calling directly
+            self._fig.canvas.get_tk_widget().after(0, lambda: self.close(reason))
+            return
         if reason == "wumpus_caught":
             self.show_end_screen(reason)
         else:
@@ -482,6 +493,7 @@ class SimVisualizer:
         Draw the current firetruck goal (from map.firetruck_goal) as a
         hot-pink ✕ marker.
         """
+        
         goal = self.map.firetruck_goal
         if goal is None:
             self._goal_scatter.set_offsets(np.empty((0, 2)))
@@ -603,15 +615,15 @@ class SimVisualizer:
         cy = self._world / 2
 
         if reason == "wumpus_caught":
-            headline = "🚒  WUMPUS CAUGHT!"
+            headline = "WUMPUS CAUGHT!"
             subline  = "Firetruck wins this round"
             color    = _C["truck_body"]       # amber
         elif reason == "time_limit":
-            headline = "⏱  TIME LIMIT REACHED"
+            headline = "TIME LIMIT REACHED"
             subline  = "Simulation complete"
             color    = _C["text_primary"]
         else:
-            headline = "✅  SIMULATION COMPLETE"
+            headline = "SIMULATION COMPLETE"
             subline  = reason
             color    = _C["text_primary"]
 
