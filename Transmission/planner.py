@@ -22,20 +22,23 @@ from collision import CollisionChecker3D
 class RRTPlanner3D:
     """3D RRT path planner with mesh-based collision checking"""
     
-    def __init__(self, bounds: List[Tuple[float, float]]):
+    def __init__(self, bounds: List[Tuple[float, float]], models_folder: str = 'models'):
         """
         Initialize 3D planner.
         
         Args:
             bounds: [(x_min, x_max), (y_min, y_max), (z_min, z_max)]
+            models_folder: Folder containing OpenSCAD models
         """
         if not OMPL_AVAILABLE:
             raise ImportError("OMPL not installed. Run: pip install ompl")
         
         self.bounds = bounds
-        self.checker = CollisionChecker3D()
+        self.models_folder = models_folder  # Store this
+        self.checker = CollisionChecker3D(models_folder=models_folder)
         self.robot_mesh = None
         self.robot_radius = None
+        self.robot_start = None
         
         # Setup OMPL state space (3D)
         self.space = ob.RealVectorStateSpace(3)
@@ -50,7 +53,7 @@ class RRTPlanner3D:
     def add_obstacle(self, scad_file: str, name: str, 
                      position: Tuple[float, float, float] = (0, 0, 0),
                      parameters: dict = None):
-        """Add obstacle from OpenSCAD file"""
+        """Add obstacle from OpenSCAD file in models folder"""
         self.checker.add_from_scad(scad_file, name, position, parameters)
         print(f"  Obstacle: {name} at {position}")
     
@@ -60,15 +63,16 @@ class RRTPlanner3D:
         Set robot as either mesh or sphere.
         
         Args:
-            scad_file: OpenSCAD file for robot mesh
+            scad_file: OpenSCAD file for robot mesh (in models folder)
             radius: Use sphere robot with given radius
             start_position: Starting position
         """
         if scad_file:
-            generator = MeshGenerator()
+            # Use the same models_folder as the checker
+            generator = MeshGenerator(models_folder=self.models_folder)
             self.robot_mesh = generator.from_scad(scad_file)
             self.robot_radius = None
-            print(f"✓ Robot loaded from {scad_file}")
+            print(f"✓ Robot loaded from {self.models_folder}/{scad_file}")
         elif radius:
             self.robot_mesh = trimesh.primitives.Sphere(radius=radius)
             self.robot_radius = radius
@@ -79,36 +83,32 @@ class RRTPlanner3D:
         self.robot_start = start_position
         
         # Setup collision checking
-        self.si.setStateValidityChecker(ob.StateValidityCheckerFn(
-            lambda state: self._is_state_valid(state)
-        ))
-    
-    def _is_state_valid(self, state) -> bool:
-        """Check if robot at given state collides with any obstacle"""
-        # Get position from state
-        x = state[0]
-        y = state[1]
-        z = state[2]
-        
-        # Check bounds
-        if (x < self.bounds[0][0] or x > self.bounds[0][1] or
-            y < self.bounds[1][0] or y > self.bounds[1][1] or
-            z < self.bounds[2][0] or z > self.bounds[2][1]):
-            return False
-        
-        # Create robot at this position
-        robot_at_pos = self.robot_mesh.copy()
-        robot_at_pos.apply_translation([x, y, z])
-        
-        # Check collision with all obstacles
-        for i, obstacle in enumerate(self.checker.meshes):
-            obstacle_at_pos = obstacle.copy()
-            obstacle_at_pos.apply_translation(self.checker.positions[i])
+        def is_state_valid(state):
+            x, y, z = state[0], state[1], state[2]
             
-            if robot_at_pos.intersects_mesh(obstacle_at_pos):
+            # Check bounds
+            if (x < self.bounds[0][0] or x > self.bounds[0][1] or
+                y < self.bounds[1][0] or y > self.bounds[1][1] or
+                z < self.bounds[2][0] or z > self.bounds[2][1]):
                 return False
+            
+            # Create robot at this position
+            robot_at_pos = self.robot_mesh.copy()
+            robot_at_pos.apply_translation([x, y, z])
+            
+            # Check collision with all obstacles
+            for i, obstacle in enumerate(self.checker.meshes):
+                obstacle_at_pos = obstacle.copy()
+                obstacle_at_pos.apply_translation(self.checker.positions[i])
+                
+                if robot_at_pos.intersects_mesh(obstacle_at_pos):
+                    return False
+            
+            return True
         
-        return True
+        # Set the state validity checker
+        self.si.setStateValidityChecker(ob.StateValidityChecker(is_state_valid))
+        self.si.setup()
     
     def plan_path(self, 
                   start: Tuple[float, float, float],
@@ -129,19 +129,15 @@ class RRTPlanner3D:
         Returns:
             List of waypoints or None if planning fails
         """
-        # Create start and goal states
-        start_state = ob.State(self.space)
-        start_state[0] = start[0]
-        start_state[1] = start[1]
-        start_state[2] = start[2]
-        
-        goal_state = ob.State(self.space)
-        goal_state[0] = goal[0]
-        goal_state[1] = goal[1]
-        goal_state[2] = goal[2]
-        
-        # Setup problem
+        # Create problem definition
         pdef = ob.ProblemDefinition(self.si)
+        
+        # Set start and goal states
+        start_state = ob.State(self.space)
+        start_state[0], start_state[1], start_state[2] = start
+        goal_state = ob.State(self.space)
+        goal_state[0], goal_state[1], goal_state[2] = goal
+        
         pdef.setStartAndGoalStates(start_state, goal_state, goal_tolerance)
         
         # Select planner
@@ -152,7 +148,7 @@ class RRTPlanner3D:
         elif planner_type == 'rrt_star':
             planner = og.RRTstar(self.si)
         else:
-            raise ValueError(f"Unknown planner: {planner_type}")
+            planner = og.RRTConnect(self.si)
         
         planner.setProblemDefinition(pdef)
         
@@ -166,11 +162,9 @@ class RRTPlanner3D:
         
         if solved:
             print("✓ Path found!")
-            
-            # Get path
             path = pdef.getSolutionPath()
             
-            # Simplify
+            # Simplify path
             simplifier = og.PathSimplifier(self.si)
             simplifier.simplify(path)
             
@@ -206,15 +200,25 @@ class RRTPlanner3D:
         
         # Add path
         if len(waypoints) > 1:
-            # Create path line
             points = np.array(waypoints)
             for i in range(len(points) - 1):
-                line = trimesh.creation.cylinder(
-                    radius=0.05,
-                    segment=[points[i], points[i+1]]
-                )
-                line.visual.face_colors = [255, 0, 0, 255]
-                scene.add_geometry(line)
+                # Create line segment
+                direction = points[i+1] - points[i]
+                length = np.linalg.norm(direction)
+                if length > 0:
+                    # Create cylinder transform
+                    transform = np.eye(4)
+                    transform[:3, 3] = points[i]
+                    # Align cylinder with direction
+                    z_axis = np.array([0, 0, 1])
+                    rot_axis = np.cross(z_axis, direction / length)
+                    angle = np.arccos(np.dot(z_axis, direction / length))
+                    if angle > 0:
+                        transform[:3, :3] = trimesh.transformations.rotation_matrix(angle, rot_axis)[:3, :3]
+                    
+                    cylinder = trimesh.creation.cylinder(radius=0.05, height=length, transform=transform)
+                    cylinder.visual.face_colors = [255, 0, 0, 255]
+                    scene.add_geometry(cylinder)
             
             # Add start marker
             start_sphere = trimesh.primitives.Sphere(radius=0.1, center=points[0])
@@ -228,7 +232,7 @@ class RRTPlanner3D:
         
         scene.show()
     
-    def save_path(self, waypoints: List[np.ndarray], filename: str = 'path.npy'):
+    def save_path(self, waypoints: List[np.ndarray], filename: str = 'planned_path.npy'):
         """Save path to file"""
         np.save(filename, np.array(waypoints))
         print(f"✓ Path saved to {filename}")
@@ -236,169 +240,3 @@ class RRTPlanner3D:
     def load_path(self, filename: str) -> List[np.ndarray]:
         """Load path from file"""
         return list(np.load(filename))
-
-
-# Example usage
-def example_simple_3d():
-    """Simple 3D example with cubes and spheres"""
-    print("\n" + "="*60)
-    print("EXAMPLE 1: Simple 3D Navigation")
-    print("="*60)
-    
-    # Create test OpenSCAD files
-    with open('wall.scad', 'w') as f:
-        f.write("cube([4, 0.5, 3], center=true);")
-    
-    with open('pillar.scad', 'w') as f:
-        f.write("cylinder(r=0.8, h=4, center=true, $fn=32);")
-    
-    # Setup planner
-    bounds = [(-5, 5), (-5, 5), (-2, 2)]
-    planner = RRTPlanner3D(bounds)
-    
-    # Add obstacles
-    planner.add_obstacle('wall.scad', 'Wall', position=(0, 2, 0))
-    planner.add_obstacle('pillar.scad', 'Pillar1', position=(1, -1, 0))
-    planner.add_obstacle('pillar.scad', 'Pillar2', position=(-1, -1, 0))
-    
-    # Set robot (sphere)
-    planner.set_robot(radius=0.4, start_position=(-4, -3, 0))
-    
-    # Plan path
-    waypoints = planner.plan_path(
-        start=(-4, -3, 0),
-        goal=(4, 3, 0),
-        planner_type='rrt_connect',
-        max_time=3.0
-    )
-    
-    if waypoints:
-        planner.visualize_path(waypoints)
-        planner.save_path(waypoints)
-    
-    # Cleanup
-    import os
-    for f in ['wall.scad', 'pillar.scad']:
-        if os.path.exists(f):
-            os.remove(f)
-
-
-def example_maze_3d():
-    """3D maze navigation example"""
-    print("\n" + "="*60)
-    print("EXAMPLE 2: 3D Maze Navigation")
-    print("="*60)
-    
-    # Create maze walls
-    wall_scad = """
-    module wall() {
-        cube([0.3, 3, 2], center=true);
-    }
-    wall();
-    """
-    
-    with open('maze_wall.scad', 'w') as f:
-        f.write(wall_scad)
-    
-    # Setup planner
-    bounds = [(-5, 5), (-5, 5), (-1, 1)]
-    planner = RRTPlanner3D(bounds)
-    
-    # Create maze obstacles (vertical walls)
-    wall_positions = [
-        (-2, 0, 0), (0, 2, 0), (0, -2, 0), (2, 0, 0),
-        (-1, 1, 0), (1, -1, 0)
-    ]
-    
-    for i, pos in enumerate(wall_positions):
-        planner.add_obstacle('maze_wall.scad', f'Wall{i}', position=pos)
-    
-    # Set robot
-    planner.set_robot(radius=0.2, start_position=(-4, -4, 0))
-    
-    # Plan through maze
-    waypoints = planner.plan_path(
-        start=(-4, -4, 0),
-        goal=(4, 4, 0),
-        planner_type='rrt_star',
-        max_time=5.0
-    )
-    
-    if waypoints:
-        print(f"\n✓ Maze path found!")
-        print(f"  Path length: {sum(np.linalg.norm(waypoints[i] - waypoints[i-1]) for i in range(1, len(waypoints))):.2f}")
-    
-    # Cleanup
-    import os
-    if os.path.exists('maze_wall.scad'):
-        os.remove('maze_wall.scad')
-
-
-def example_complex_obstacles():
-    """Example with complex 3D obstacles from OpenSCAD"""
-    print("\n" + "="*60)
-    print("EXAMPLE 3: Complex 3D Obstacles")
-    print("="*60)
-    
-    # Create complex obstacle (a torus/ring)
-    complex_obstacle = """
-    $fn=48;
-    difference() {
-        cylinder(r=2, h=1, center=true);
-        cylinder(r=1.2, h=1.1, center=true);
-    }
-    """
-    
-    with open('ring.scad', 'w') as f:
-        f.write(complex_obstacle)
-    
-    # Create simple obstacle
-    with open('block.scad', 'w') as f:
-        f.write("cube([2, 2, 2], center=true);")
-    
-    # Setup planner
-    bounds = [(-6, 6), (-6, 6), (-2, 2)]
-    planner = RRTPlanner3D(bounds)
-    
-    # Add obstacles
-    planner.add_obstacle('ring.scad', 'Ring', position=(0, 0, 0))
-    planner.add_obstacle('block.scad', 'Block1', position=(3, 2, 0))
-    planner.add_obstacle('block.scad', 'Block2', position=(-3, -2, 0))
-    planner.add_obstacle('block.scad', 'Block3', position=(2, -3, 0))
-    
-    # Set robot as sphere
-    planner.set_robot(radius=0.5, start_position=(-5, -5, 0))
-    
-    # Plan path
-    waypoints = planner.plan_path(
-        start=(-5, -5, 0),
-        goal=(5, 5, 0),
-        planner_type='rrt_connect',
-        max_time=5.0
-    )
-    
-    if waypoints:
-        print(f"\n✓ Path through complex obstacles found!")
-        print(f"  Waypoints: {len(waypoints)}")
-    
-    # Cleanup
-    import os
-    for f in ['ring.scad', 'block.scad']:
-        if os.path.exists(f):
-            os.remove(f)
-
-
-if __name__ == "__main__":
-    if not OMPL_AVAILABLE:
-        print("\n❌ OMPL not installed!")
-        print("Install with: pip install ompl")
-        exit(1)
-    
-    # Run examples
-    example_simple_3d()
-    example_maze_3d()
-    example_complex_obstacles()
-    
-    print("\n" + "="*60)
-    print("✓ All 3D examples complete!")
-    print("="*60)

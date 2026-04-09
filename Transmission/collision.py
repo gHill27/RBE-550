@@ -5,18 +5,24 @@ collision_checker.py - 3D collision detection for meshes
 
 import numpy as np
 import trimesh
-from typing import List, Tuple, Optional, Dict, Union
+from typing import List, Tuple, Optional, Dict
 from pathlib import Path
 from mesh_gen import MeshGenerator
 
 class CollisionChecker3D:
     """3D collision detection between multiple meshes"""
     
-    def __init__(self):
+    def __init__(self, models_folder: str = 'models'):
+        """
+        Initialize collision checker.
+        
+        Args:
+            models_folder: Folder containing OpenSCAD models
+        """
         self.meshes = []
         self.names = []
-        self.positions = []  # (x, y, z) positions
-        self.mesh_generator = MeshGenerator()
+        self.positions = []
+        self.mesh_generator = MeshGenerator(models_folder=models_folder)
     
     def add_mesh(self, mesh: trimesh.Trimesh, name: str = None, 
                  position: Tuple[float, float, float] = (0, 0, 0)):
@@ -26,12 +32,21 @@ class CollisionChecker3D:
         self.positions.append(np.array(position))
         print(f"✓ Added '{self.names[-1]}' at {position}")
     
-    def add_from_scad(self, scad_file: Union[str, Path], name: str = None,
+    def add_from_scad(self, scad_file: str, name: str = None,
                       position: Tuple[float, float, float] = (0, 0, 0),
-                      parameters: Dict = None):
+                      parameters: Dict = None,
+                      fix_mesh: bool = False):
         """Load and add mesh from OpenSCAD file"""
-        mesh = self.mesh_generator.from_scad(scad_file, parameters=parameters)
-        self.add_mesh(mesh, name or Path(scad_file).stem, position)
+        try:
+            mesh = self.mesh_generator.from_scad(
+                scad_file, 
+                parameters=parameters, 
+                fix_mesh=fix_mesh
+            )
+            self.add_mesh(mesh, name or Path(scad_file).stem, position)
+        except Exception as e:
+            print(f"❌ Failed to load {scad_file}: {e}")
+            raise
     
     def get_mesh_at_position(self, index: int) -> trimesh.Trimesh:
         """Get mesh transformed to its position"""
@@ -39,11 +54,23 @@ class CollisionChecker3D:
         mesh.apply_translation(self.positions[index])
         return mesh
     
-    def check_collision(self, index1: int, index2: int) -> bool:
+    def check_collision(self, index1: int, index2: int, use_bvh: bool = True) -> bool:
         """Check if two meshes collide"""
-        mesh1 = self.get_mesh_at_position(index1)
-        mesh2 = self.get_mesh_at_position(index2)
-        return mesh1.intersects_mesh(mesh2)
+        try:
+            mesh1 = self.get_mesh_at_position(index1)
+            mesh2 = self.get_mesh_at_position(index2)
+            
+            if use_bvh:
+                return mesh1.intersects_mesh(mesh2)
+            else:
+                # Simple bounding box check first (faster for quick rejection)
+                if not mesh1.bounds.intersects(mesh2.bounds):
+                    return False
+                return mesh1.intersects_mesh(mesh2)
+                
+        except Exception as e:
+            print(f"⚠️  Collision check failed: {e}")
+            return False
     
     def check_all_collisions(self) -> List[Tuple[int, int]]:
         """Check all pairs for collisions"""
@@ -96,11 +123,6 @@ class CollisionChecker3D:
             return -mesh1.min_distance(mesh2)
         else:
             return mesh1.min_distance(mesh2)
-    
-    def is_point_inside(self, mesh_index: int, point: Tuple[float, float, float]) -> bool:
-        """Check if point is inside mesh"""
-        mesh = self.get_mesh_at_position(mesh_index)
-        return mesh.contains([point])[0]
     
     def visualize(self):
         """Visualize all meshes in 3D"""
