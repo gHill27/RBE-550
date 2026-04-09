@@ -1,307 +1,404 @@
-# planner.py
-import numpy as np
-from scipy.spatial import KDTree
-from scipy.spatial.transform import Rotation
-from config import sample_config, steer, goal_reached, Q_START, Q_GOAL, distance_config
-from collision import is_collision_free, init_collision_checker
-from geometry import build_mainshaft, build_countershaft, build_case, get_countershaft_pose
+#!/usr/bin/env python3
+"""
+ompl_planner.py - 3D RRT path planning with OpenSCAD obstacles
+"""
 
-class RRTConnect:
-    def __init__(self, max_iters=5000, step_size=30.0, goal_bias=0.05):
-        self.max_iters = max_iters
-        self.step_size = step_size
-        self.goal_bias = goal_bias
-        
-        # Initialize trees with nodes and parents
-        self.tree_a = {
-            'nodes': [Q_START.copy()], 
-            'parents': [-1],
-            'kd_tree': None  # Will be rebuilt when needed
-        }
-        self.tree_b = {
-            'nodes': [Q_GOAL.copy()], 
-            'parents': [-1],
-            'kd_tree': None
-        }
-        
-        # Load geometry for collision checking
-        
-        self.mainshaft_cyls = build_mainshaft()
-        self.countershaft_cyls = build_countershaft()
-        self.case_walls = build_case()
-        self.countershaft_pose = get_countershaft_pose()
-        
-        init_collision_checker(
-            self.mainshaft_cyls, 
-            self.countershaft_cyls, 
-            self.case_walls, 
-            self.countershaft_pose
-        )
-        
-        # KD-Tree rebuild threshold (rebuild every N additions)
-        self.rebuild_threshold = 50
-        self.nodes_since_rebuild_a = 0
-        self.nodes_since_rebuild_b = 0
+import numpy as np
+import trimesh
+from typing import List, Tuple, Optional
+from pathlib import Path
+
+try:
+    from ompl import base as ob
+    from ompl import geometric as og
+    OMPL_AVAILABLE = True
+except ImportError:
+    OMPL_AVAILABLE = False
+    print("Warning: OMPL not installed. Run: pip install ompl")
+
+from mesh_gen import MeshGenerator
+from collision import CollisionChecker3D
+
+class RRTPlanner3D:
+    """3D RRT path planner with mesh-based collision checking"""
     
-    def rebuild_kdtree(self, tree):
-        """Rebuild KD-tree for a given tree's position components."""
-        if len(tree['nodes']) == 0:
-            tree['kd_tree'] = None
-            return
+    def __init__(self, bounds: List[Tuple[float, float]]):
+        """
+        Initialize 3D planner.
         
-        # Extract only position components (x, y, z) for KD-Tree
-        positions = np.array([node[:3] for node in tree['nodes']])
+        Args:
+            bounds: [(x_min, x_max), (y_min, y_max), (z_min, z_max)]
+        """
+        if not OMPL_AVAILABLE:
+            raise ImportError("OMPL not installed. Run: pip install ompl")
         
-        # Build KD-Tree with Euclidean distance
-        if len(positions) > 0:
-            tree['kd_tree'] = KDTree(positions)
+        self.bounds = bounds
+        self.checker = CollisionChecker3D()
+        self.robot_mesh = None
+        self.robot_radius = None
+        
+        # Setup OMPL state space (3D)
+        self.space = ob.RealVectorStateSpace(3)
+        bounds_obj = ob.RealVectorBounds(3)
+        for i, (low, high) in enumerate(bounds):
+            bounds_obj.setLow(i, low)
+            bounds_obj.setHigh(i, high)
+        self.space.setBounds(bounds_obj)
+        
+        self.si = ob.SpaceInformation(self.space)
+    
+    def add_obstacle(self, scad_file: str, name: str, 
+                     position: Tuple[float, float, float] = (0, 0, 0),
+                     parameters: dict = None):
+        """Add obstacle from OpenSCAD file"""
+        self.checker.add_from_scad(scad_file, name, position, parameters)
+        print(f"  Obstacle: {name} at {position}")
+    
+    def set_robot(self, scad_file: str = None, radius: float = None,
+                  start_position: Tuple[float, float, float] = (0, 0, 0)):
+        """
+        Set robot as either mesh or sphere.
+        
+        Args:
+            scad_file: OpenSCAD file for robot mesh
+            radius: Use sphere robot with given radius
+            start_position: Starting position
+        """
+        if scad_file:
+            generator = MeshGenerator()
+            self.robot_mesh = generator.from_scad(scad_file)
+            self.robot_radius = None
+            print(f"✓ Robot loaded from {scad_file}")
+        elif radius:
+            self.robot_mesh = trimesh.primitives.Sphere(radius=radius)
+            self.robot_radius = radius
+            print(f"✓ Robot set as sphere (radius={radius})")
         else:
-            tree['kd_tree'] = None
-    
-    def nearest(self, tree, q_rand, use_kdtree=True):
-        """
-        Find nearest node using KD-Tree for efficiency.
-        Returns index of nearest node.
-        """
-        if len(tree['nodes']) == 0:
-            return -1
+            raise ValueError("Must provide either scad_file or radius")
         
-        if use_kdtree and tree['kd_tree'] is not None:
-            # Extract query position
-            q_pos = q_rand[:3].reshape(1, -1)  # Reshape to 2D for consistent return
+        self.robot_start = start_position
+        
+        # Setup collision checking
+        self.si.setStateValidityChecker(ob.StateValidityCheckerFn(
+            lambda state: self._is_state_valid(state)
+        ))
+    
+    def _is_state_valid(self, state) -> bool:
+        """Check if robot at given state collides with any obstacle"""
+        # Get position from state
+        x = state[0]
+        y = state[1]
+        z = state[2]
+        
+        # Check bounds
+        if (x < self.bounds[0][0] or x > self.bounds[0][1] or
+            y < self.bounds[1][0] or y > self.bounds[1][1] or
+            z < self.bounds[2][0] or z > self.bounds[2][1]):
+            return False
+        
+        # Create robot at this position
+        robot_at_pos = self.robot_mesh.copy()
+        robot_at_pos.apply_translation([x, y, z])
+        
+        # Check collision with all obstacles
+        for i, obstacle in enumerate(self.checker.meshes):
+            obstacle_at_pos = obstacle.copy()
+            obstacle_at_pos.apply_translation(self.checker.positions[i])
             
-            # Get k nearest neighbors (k=10 or less if tree is smaller)
-            k = min(10, len(tree['nodes']))
-            dists, indices = tree['kd_tree'].query(q_pos, k=k)
-            
-            # Flatten the results (query with 1 point returns 1D arrays)
-            dists = dists.flatten() if hasattr(dists, 'flatten') else [dists]
-            indices = indices.flatten() if hasattr(indices, 'flatten') else [indices]
-            
-            # Find best by full distance metric (position + orientation)
-            best_idx = indices[0]
-            best_dist = distance_config(tree['nodes'][best_idx], q_rand)
-            
-            for i in range(1, len(indices)):
-                idx_candidate = indices[i]
-                dist_candidate = distance_config(tree['nodes'][idx_candidate], q_rand)
-                if dist_candidate < best_dist:
-                    best_dist = dist_candidate
-                    best_idx = idx_candidate
-            
-            return best_idx
+            if robot_at_pos.intersects_mesh(obstacle_at_pos):
+                return False
+        
+        return True
+    
+    def plan_path(self, 
+                  start: Tuple[float, float, float],
+                  goal: Tuple[float, float, float],
+                  planner_type: str = 'rrt_connect',
+                  max_time: float = 5.0,
+                  goal_tolerance: float = 0.1) -> Optional[List[np.ndarray]]:
+        """
+        Plan 3D path using RRT.
+        
+        Args:
+            start: (x, y, z) start position
+            goal: (x, y, z) goal position
+            planner_type: 'rrt', 'rrt_connect', or 'rrt_star'
+            max_time: Maximum planning time in seconds
+            goal_tolerance: Distance tolerance for goal
+        
+        Returns:
+            List of waypoints or None if planning fails
+        """
+        # Create start and goal states
+        start_state = ob.State(self.space)
+        start_state[0] = start[0]
+        start_state[1] = start[1]
+        start_state[2] = start[2]
+        
+        goal_state = ob.State(self.space)
+        goal_state[0] = goal[0]
+        goal_state[1] = goal[1]
+        goal_state[2] = goal[2]
+        
+        # Setup problem
+        pdef = ob.ProblemDefinition(self.si)
+        pdef.setStartAndGoalStates(start_state, goal_state, goal_tolerance)
+        
+        # Select planner
+        if planner_type == 'rrt':
+            planner = og.RRT(self.si)
+        elif planner_type == 'rrt_connect':
+            planner = og.RRTConnect(self.si)
+        elif planner_type == 'rrt_star':
+            planner = og.RRTstar(self.si)
         else:
-            # Fallback to brute force (O(N))
-            best_idx = 0
-            best_dist = distance_config(tree['nodes'][0], q_rand)
-            
-            for i, node in enumerate(tree['nodes'][1:], 1):
-                dist = distance_config(node, q_rand)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = i
-            
-            return best_idx
-    
-    def add_node_to_tree(self, tree, q_new, parent_idx):
-        """Add a new node and update KD-Tree if needed."""
-        tree['nodes'].append(q_new)
-        tree['parents'].append(parent_idx)
+            raise ValueError(f"Unknown planner: {planner_type}")
         
-        # Track tree type for rebuild threshold
-        if tree is self.tree_a:
-            self.nodes_since_rebuild_a += 1
-            if self.nodes_since_rebuild_a >= self.rebuild_threshold:
-                self.rebuild_kdtree(tree)
-                self.nodes_since_rebuild_a = 0
+        planner.setProblemDefinition(pdef)
+        
+        # Plan
+        print(f"\n🚀 Planning with {planner_type.upper()}...")
+        print(f"   Start: {start}")
+        print(f"   Goal: {goal}")
+        print(f"   Time limit: {max_time}s")
+        
+        solved = planner.solve(max_time)
+        
+        if solved:
+            print("✓ Path found!")
+            
+            # Get path
+            path = pdef.getSolutionPath()
+            
+            # Simplify
+            simplifier = og.PathSimplifier(self.si)
+            simplifier.simplify(path)
+            
+            # Extract waypoints
+            waypoints = []
+            for i in range(path.getStateCount()):
+                state = path.getState(i)
+                waypoints.append(np.array([state[0], state[1], state[2]]))
+            
+            # Calculate path length
+            length = 0
+            for i in range(1, len(waypoints)):
+                length += np.linalg.norm(waypoints[i] - waypoints[i-1])
+            
+            print(f"   Waypoints: {len(waypoints)}")
+            print(f"   Path length: {length:.2f}")
+            
+            return waypoints
         else:
-            self.nodes_since_rebuild_b += 1
-            if self.nodes_since_rebuild_b >= self.rebuild_threshold:
-                self.rebuild_kdtree(tree)
-                self.nodes_since_rebuild_b = 0
+            print("✗ No path found!")
+            return None
     
-    def is_collision_free_config(self, q):
-        """Wrapper for collision checking."""
-        return is_collision_free(
-            q, self.mainshaft_cyls, self.countershaft_cyls, 
-            self.case_walls, self.countershaft_pose
-        )
+    def visualize_path(self, waypoints: List[np.ndarray]):
+        """Visualize obstacles and planned path"""
+        scene = trimesh.Scene()
+        
+        # Add obstacles
+        for i, mesh in enumerate(self.checker.meshes):
+            mesh_copy = mesh.copy()
+            mesh_copy.apply_translation(self.checker.positions[i])
+            mesh_copy.visual.face_colors = [100, 100, 255, 128]
+            scene.add_geometry(mesh_copy, node_name=f"obstacle_{i}")
+        
+        # Add path
+        if len(waypoints) > 1:
+            # Create path line
+            points = np.array(waypoints)
+            for i in range(len(points) - 1):
+                line = trimesh.creation.cylinder(
+                    radius=0.05,
+                    segment=[points[i], points[i+1]]
+                )
+                line.visual.face_colors = [255, 0, 0, 255]
+                scene.add_geometry(line)
+            
+            # Add start marker
+            start_sphere = trimesh.primitives.Sphere(radius=0.1, center=points[0])
+            start_sphere.visual.face_colors = [0, 255, 0, 255]
+            scene.add_geometry(start_sphere)
+            
+            # Add goal marker
+            goal_sphere = trimesh.primitives.Sphere(radius=0.1, center=points[-1])
+            goal_sphere.visual.face_colors = [0, 0, 255, 255]
+            scene.add_geometry(goal_sphere)
+        
+        scene.show()
     
-    def extend(self, tree, q_rand):
-        """Extend tree toward q_rand. Returns new node or None."""
-        if len(tree['nodes']) == 0:
-            return None, None
-            
-        idx = self.nearest(tree, q_rand)
-        q_near = tree['nodes'][idx]
-        q_new = steer(q_near, q_rand, self.step_size)
-        
-        # Check if the new node is valid
-        if self.is_collision_free_config(q_new):
-            self.add_node_to_tree(tree, q_new, idx)
-            return q_new, len(tree['nodes']) - 1
-        return None, None
+    def save_path(self, waypoints: List[np.ndarray], filename: str = 'path.npy'):
+        """Save path to file"""
+        np.save(filename, np.array(waypoints))
+        print(f"✓ Path saved to {filename}")
     
-    def connect(self, tree, q_target):
-        """
-        Repeatedly extend tree toward q_target until reached or blocked.
-        Returns (final_node, final_idx, success_flag)
-        """
-        step_count = 0
-        max_steps = 50  # Prevent infinite loops
-        
-        while step_count < max_steps:
-            q_new, idx = self.extend(tree, q_target)
-            if q_new is None:
-                return None, None, False
-            
-            if distance_config(q_new, q_target) < self.step_size:
-                # Close enough to target
-                if self.is_collision_free_config(q_target):
-                    self.add_node_to_tree(tree, q_target, idx)
-                    return q_target, len(tree['nodes']) - 1, True
-                return q_new, idx, False
-            
-            step_count += 1
-        
-        return None, None, False
+    def load_path(self, filename: str) -> List[np.ndarray]:
+        """Load path from file"""
+        return list(np.load(filename))
+
+
+# Example usage
+def example_simple_3d():
+    """Simple 3D example with cubes and spheres"""
+    print("\n" + "="*60)
+    print("EXAMPLE 1: Simple 3D Navigation")
+    print("="*60)
     
-    def plan(self):
-        """RRT-Connect planning algorithm with KD-Tree optimization."""
-        print("Starting RRT-Connect planning with KD-Tree optimization...")
-        print(f"Start: {Q_START[:3]}")
-        print(f"Goal: {Q_GOAL[:3]}")
-        
-        # Build initial KD-Trees
-        self.rebuild_kdtree(self.tree_a)
-        self.rebuild_kdtree(self.tree_b)
-        
-        for i in range(self.max_iters):
-            # Sample random config (with goal bias)
-            if np.random.rand() < self.goal_bias:
-                q_rand = Q_GOAL.copy()
-            else:
-                q_rand = sample_config()
-            
-            # Extend tree_a
-            q_new, idx_a = self.extend(self.tree_a, q_rand)
-            
-            if q_new is not None:
-                # Try to connect tree_b to q_new
-                q_con, idx_b, success = self.connect(self.tree_b, q_new)
-                
-                if success:
-                    print(f"\n✓ Path found at iteration {i}!")
-                    print(f"  Tree A nodes: {len(self.tree_a['nodes'])}")
-                    print(f"  Tree B nodes: {len(self.tree_b['nodes'])}")
-                    return self.extract_path(idx_a, idx_b)
-            
-            # Swap trees for bidirectional growth
-            self.tree_a, self.tree_b = self.tree_b, self.tree_a
-            
-            # Progress update
-            if (i + 1) % 500 == 0:
-                print(f"Iteration {i+1}: Tree A={len(self.tree_a['nodes'])}, "
-                      f"Tree B={len(self.tree_b['nodes'])}")
-        
-        print(f"\n✗ No path found after {self.max_iters} iterations")
-        return None
+    # Create test OpenSCAD files
+    with open('wall.scad', 'w') as f:
+        f.write("cube([4, 0.5, 3], center=true);")
     
-    def extract_path(self, idx_a, idx_b):
-        """Trace back through both trees and join."""
-        # Path from start to connection point
-        path_start_to_conn = []
-        current_idx = idx_a
-        while current_idx >= 0:
-            path_start_to_conn.append(self.tree_a['nodes'][current_idx])
-            current_idx = self.tree_a['parents'][current_idx]
-        path_start_to_conn.reverse()
-        
-        # Path from connection point to goal
-        path_conn_to_goal = []
-        current_idx = idx_b
-        while current_idx >= 0:
-            path_conn_to_goal.append(self.tree_b['nodes'][current_idx])
-            current_idx = self.tree_b['parents'][current_idx]
-        
-        # Combine
-        full_path = path_start_to_conn + path_conn_to_goal
-        
-        # Smooth the path
-        smoothed = self.smooth_path(full_path)
-        
-        return smoothed
+    with open('pillar.scad', 'w') as f:
+        f.write("cylinder(r=0.8, h=4, center=true, $fn=32);")
     
-    def slerp(self, q1, q2, t):
-        """Spherical Linear Interpolation between two quaternions."""
-        # Normalize inputs
-        q1 = q1 / np.linalg.norm(q1)
-        q2 = q2 / np.linalg.norm(q2)
-        
-        # Compute dot product
-        dot = np.dot(q1, q2)
-        
-        # If dot is negative, flip one quaternion to take the shorter path
-        if dot < 0:
-            q2 = -q2
-            dot = -dot
-        
-        # Clamp dot to avoid numerical issues
-        dot = np.clip(dot, -1.0, 1.0)
-        
-        # If quaternions are very close, use linear interpolation
-        if dot > 0.9995:
-            result = q1 + t * (q2 - q1)
-            return result / np.linalg.norm(result)
-        
-        # Standard SLERP
-        theta = np.arccos(dot)
-        sin_theta = np.sin(theta)
-        
-        w1 = np.sin((1 - t) * theta) / sin_theta
-        w2 = np.sin(t * theta) / sin_theta
-        
-        result = w1 * q1 + w2 * q2
-        return result / np.linalg.norm(result)
+    # Setup planner
+    bounds = [(-5, 5), (-5, 5), (-2, 2)]
+    planner = RRTPlanner3D(bounds)
     
-    def smooth_path(self, path, attempts=500):
-        """Shortcut smoothing with collision checking."""
-        if len(path) < 3:
-            return path
-        
-        smoothed = [p.copy() for p in path]
-        
-        for attempt in range(attempts):
-            if len(smoothed) < 3:
-                break
-            
-            # Pick two random indices (not adjacent)
-            i = np.random.randint(0, len(smoothed) - 2)
-            j = np.random.randint(i + 2, len(smoothed))
-            
-            q_from = smoothed[i]
-            q_to = smoothed[j]
-            
-            # Check if direct path is collision-free
-            num_steps = max(5, int(distance_config(q_from, q_to) / self.step_size) + 1)
-            valid = True
-            
-            for step in range(1, num_steps):
-                t = step / num_steps
-                # Interpolate position
-                pos = (1 - t) * q_from[:3] + t * q_to[:3]
-                # SLERP for orientation
-                q_from_wxyz = q_from[3:7]
-                q_to_wxyz = q_to[3:7]
-                q_interp = self.slerp(q_from_wxyz, q_to_wxyz, t)
-                q_test = np.concatenate([pos, q_interp])
-                
-                if not self.is_collision_free_config(q_test):
-                    valid = False
-                    break
-            
-            if valid:
-                # Replace segment with direct connection
-                smoothed = smoothed[:i+1] + smoothed[j:]
-        
-        return smoothed
+    # Add obstacles
+    planner.add_obstacle('wall.scad', 'Wall', position=(0, 2, 0))
+    planner.add_obstacle('pillar.scad', 'Pillar1', position=(1, -1, 0))
+    planner.add_obstacle('pillar.scad', 'Pillar2', position=(-1, -1, 0))
+    
+    # Set robot (sphere)
+    planner.set_robot(radius=0.4, start_position=(-4, -3, 0))
+    
+    # Plan path
+    waypoints = planner.plan_path(
+        start=(-4, -3, 0),
+        goal=(4, 3, 0),
+        planner_type='rrt_connect',
+        max_time=3.0
+    )
+    
+    if waypoints:
+        planner.visualize_path(waypoints)
+        planner.save_path(waypoints)
+    
+    # Cleanup
+    import os
+    for f in ['wall.scad', 'pillar.scad']:
+        if os.path.exists(f):
+            os.remove(f)
+
+
+def example_maze_3d():
+    """3D maze navigation example"""
+    print("\n" + "="*60)
+    print("EXAMPLE 2: 3D Maze Navigation")
+    print("="*60)
+    
+    # Create maze walls
+    wall_scad = """
+    module wall() {
+        cube([0.3, 3, 2], center=true);
+    }
+    wall();
+    """
+    
+    with open('maze_wall.scad', 'w') as f:
+        f.write(wall_scad)
+    
+    # Setup planner
+    bounds = [(-5, 5), (-5, 5), (-1, 1)]
+    planner = RRTPlanner3D(bounds)
+    
+    # Create maze obstacles (vertical walls)
+    wall_positions = [
+        (-2, 0, 0), (0, 2, 0), (0, -2, 0), (2, 0, 0),
+        (-1, 1, 0), (1, -1, 0)
+    ]
+    
+    for i, pos in enumerate(wall_positions):
+        planner.add_obstacle('maze_wall.scad', f'Wall{i}', position=pos)
+    
+    # Set robot
+    planner.set_robot(radius=0.2, start_position=(-4, -4, 0))
+    
+    # Plan through maze
+    waypoints = planner.plan_path(
+        start=(-4, -4, 0),
+        goal=(4, 4, 0),
+        planner_type='rrt_star',
+        max_time=5.0
+    )
+    
+    if waypoints:
+        print(f"\n✓ Maze path found!")
+        print(f"  Path length: {sum(np.linalg.norm(waypoints[i] - waypoints[i-1]) for i in range(1, len(waypoints))):.2f}")
+    
+    # Cleanup
+    import os
+    if os.path.exists('maze_wall.scad'):
+        os.remove('maze_wall.scad')
+
+
+def example_complex_obstacles():
+    """Example with complex 3D obstacles from OpenSCAD"""
+    print("\n" + "="*60)
+    print("EXAMPLE 3: Complex 3D Obstacles")
+    print("="*60)
+    
+    # Create complex obstacle (a torus/ring)
+    complex_obstacle = """
+    $fn=48;
+    difference() {
+        cylinder(r=2, h=1, center=true);
+        cylinder(r=1.2, h=1.1, center=true);
+    }
+    """
+    
+    with open('ring.scad', 'w') as f:
+        f.write(complex_obstacle)
+    
+    # Create simple obstacle
+    with open('block.scad', 'w') as f:
+        f.write("cube([2, 2, 2], center=true);")
+    
+    # Setup planner
+    bounds = [(-6, 6), (-6, 6), (-2, 2)]
+    planner = RRTPlanner3D(bounds)
+    
+    # Add obstacles
+    planner.add_obstacle('ring.scad', 'Ring', position=(0, 0, 0))
+    planner.add_obstacle('block.scad', 'Block1', position=(3, 2, 0))
+    planner.add_obstacle('block.scad', 'Block2', position=(-3, -2, 0))
+    planner.add_obstacle('block.scad', 'Block3', position=(2, -3, 0))
+    
+    # Set robot as sphere
+    planner.set_robot(radius=0.5, start_position=(-5, -5, 0))
+    
+    # Plan path
+    waypoints = planner.plan_path(
+        start=(-5, -5, 0),
+        goal=(5, 5, 0),
+        planner_type='rrt_connect',
+        max_time=5.0
+    )
+    
+    if waypoints:
+        print(f"\n✓ Path through complex obstacles found!")
+        print(f"  Waypoints: {len(waypoints)}")
+    
+    # Cleanup
+    import os
+    for f in ['ring.scad', 'block.scad']:
+        if os.path.exists(f):
+            os.remove(f)
+
+
+if __name__ == "__main__":
+    if not OMPL_AVAILABLE:
+        print("\n❌ OMPL not installed!")
+        print("Install with: pip install ompl")
+        exit(1)
+    
+    # Run examples
+    example_simple_3d()
+    example_maze_3d()
+    example_complex_obstacles()
+    
+    print("\n" + "="*60)
+    print("✓ All 3D examples complete!")
+    print("="*60)

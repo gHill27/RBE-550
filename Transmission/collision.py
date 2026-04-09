@@ -1,380 +1,155 @@
-# collision.py
+#!/usr/bin/env python3
+"""
+collision_checker.py - 3D collision detection for meshes
+"""
+
 import numpy as np
 import trimesh
-from scipy.spatial.transform import Rotation
+from typing import List, Tuple, Optional, Dict, Union
+from pathlib import Path
+from mesh_gen import MeshGenerator
 
-class CylinderMesh:
-    """Helper class to create and manage cylinder meshes."""
+class CollisionChecker3D:
+    """3D collision detection between multiple meshes"""
     
-    @staticmethod
-    def create(radius, height, center, axis, resolution=32):
-        """
-        Create a cylinder mesh at specified position and orientation.
+    def __init__(self):
+        self.meshes = []
+        self.names = []
+        self.positions = []  # (x, y, z) positions
+        self.mesh_generator = MeshGenerator()
+    
+    def add_mesh(self, mesh: trimesh.Trimesh, name: str = None, 
+                 position: Tuple[float, float, float] = (0, 0, 0)):
+        """Add a mesh at specified position"""
+        self.meshes.append(mesh)
+        self.names.append(name or f"Mesh_{len(self.meshes)}")
+        self.positions.append(np.array(position))
+        print(f"✓ Added '{self.names[-1]}' at {position}")
+    
+    def add_from_scad(self, scad_file: Union[str, Path], name: str = None,
+                      position: Tuple[float, float, float] = (0, 0, 0),
+                      parameters: Dict = None):
+        """Load and add mesh from OpenSCAD file"""
+        mesh = self.mesh_generator.from_scad(scad_file, parameters=parameters)
+        self.add_mesh(mesh, name or Path(scad_file).stem, position)
+    
+    def get_mesh_at_position(self, index: int) -> trimesh.Trimesh:
+        """Get mesh transformed to its position"""
+        mesh = self.meshes[index].copy()
+        mesh.apply_translation(self.positions[index])
+        return mesh
+    
+    def check_collision(self, index1: int, index2: int) -> bool:
+        """Check if two meshes collide"""
+        mesh1 = self.get_mesh_at_position(index1)
+        mesh2 = self.get_mesh_at_position(index2)
+        return mesh1.intersects_mesh(mesh2)
+    
+    def check_all_collisions(self) -> List[Tuple[int, int]]:
+        """Check all pairs for collisions"""
+        collisions = []
+        n = len(self.meshes)
         
-        Args:
-            radius: Cylinder radius in mm
-            height: Cylinder height in mm
-            center: 3D position of cylinder center
-            axis: 3D direction vector for cylinder axis
-            resolution: Number of segments around circumference
+        for i in range(n):
+            for j in range(i + 1, n):
+                if self.check_collision(i, j):
+                    collisions.append((i, j))
         
-        Returns:
-            trimesh.Trimesh object
-        """
-        # Create cylinder along Z axis
-        cylinder = trimesh.creation.cylinder(
-            radius=radius,
-            height=height,
-            sections=resolution,
-            segment=None
-        )
+        return collisions
+    
+    def get_collision_details(self, index1: int, index2: int) -> Dict:
+        """Get detailed collision information"""
+        mesh1 = self.get_mesh_at_position(index1)
+        mesh2 = self.get_mesh_at_position(index2)
         
-        # Compute rotation from Z axis to target axis
-        z_axis = np.array([0, 0, 1])
-        target_axis = np.array(axis) / np.linalg.norm(axis)
+        intersects = mesh1.intersects_mesh(mesh2)
         
-        if not np.allclose(z_axis, target_axis):
-            # Calculate rotation axis and angle
-            rot_axis = np.cross(z_axis, target_axis)
-            rot_axis = rot_axis / np.linalg.norm(rot_axis)
-            angle = np.arccos(np.clip(np.dot(z_axis, target_axis), -1, 1))
+        if intersects:
+            try:
+                intersection = mesh1.intersection(mesh2)
+                intersection_volume = intersection.volume if hasattr(intersection, 'volume') else 0
+                penetration = -mesh1.min_distance(mesh2)
+            except:
+                intersection_volume = 0
+                penetration = 0
             
-            # Create rotation matrix
-            R = Rotation.from_rotvec(rot_axis * angle).as_matrix()
-            
-            # Apply rotation to vertices
-            cylinder.vertices = cylinder.vertices @ R.T
-        
-        # Apply translation
-        cylinder.apply_translation(center)
-        
-        return cylinder
-
-
-class CollisionChecker:
-    """
-    Collision checker using trimesh for accurate geometric collision detection.
-    Implements CGAL-like functionality in Python.
-    """
+            return {
+                'collision': True,
+                'penetration_depth': penetration,
+                'intersection_volume': intersection_volume,
+                'meshes': (self.names[index1], self.names[index2])
+            }
+        else:
+            distance = mesh1.min_distance(mesh2)
+            return {
+                'collision': False,
+                'distance': distance,
+                'meshes': (self.names[index1], self.names[index2])
+            }
     
-    def __init__(self, mainshaft_cyls, countershaft_cyls, case_walls, 
-                 countershaft_pose=None):
-        """
-        Initialize collision checker with geometric models.
+    def distance_between(self, index1: int, index2: int) -> float:
+        """Get minimum distance between two meshes (negative if intersecting)"""
+        mesh1 = self.get_mesh_at_position(index1)
+        mesh2 = self.get_mesh_at_position(index2)
         
-        Args:
-            mainshaft_cyls: List of Cylinder objects for mainshaft
-            countershaft_cyls: List of Cylinder objects for countershaft
-            case_walls: List of Box objects for case walls
-            countershaft_pose: Fixed pose for countershaft [x,y,z,qw,qx,qy,qz]
-        """
-        self.mainshaft_cyls = mainshaft_cyls
-        self.countershaft_cyls = countershaft_cyls
-        self.case_walls = case_walls
-        
-        # Set default countershaft pose if not provided
-        if countershaft_pose is None:
-            from geometry import get_countershaft_pose
-            countershaft_pose = get_countershaft_pose()
-        
-        self.countershaft_pose = countershaft_pose
-        
-        # Pre-build static obstacle meshes for faster collision checking
-        self.countershaft_mesh = self._build_countershaft_mesh()
-        self.case_mesh = self._build_case_mesh()
-        
-        # Cache for mainshaft meshes (to avoid rebuilding for same config)
-        self.mesh_cache = {}
-        self.cache_size = 100  # Maximum cache size
-        
-    def _build_countershaft_mesh(self):
-        """Build a single mesh from all countershaft cylinders."""
-        pos = self.countershaft_pose[:3]
-        quat = self.countershaft_pose[3:]  # [qw, qx, qy, qz]
-        r = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
-        
-        meshes = []
-        for cyl in self.countershaft_cyls:
-            center = pos + r.apply(cyl.offset)
-            axis = r.apply([0, 0, 1])
-            
-            mesh = CylinderMesh.create(cyl.radius, cyl.height, center, axis)
-            meshes.append(mesh)
-        
-        # Combine all countershaft meshes into one
-        if meshes:
-            combined = trimesh.util.concatenate(meshes)
-            # Simplify mesh for faster collision detection
-            combined = combined.simplify_quadratic_decimation(
-                target_count=len(combined.faces) // 2
-            )
-            return combined
-        return None
+        if mesh1.intersects_mesh(mesh2):
+            return -mesh1.min_distance(mesh2)
+        else:
+            return mesh1.min_distance(mesh2)
     
-    def _build_case_mesh(self):
-        """Build a mesh from all case walls."""
-        meshes = []
-        
-        for wall in self.case_walls:
-            # Create box from min/max corners
-            center = (wall.min + wall.max) / 2
-            extents = (wall.max - wall.min) / 2
-            
-            # Create box mesh
-            box = trimesh.creation.box(extents=extents)
-            box.apply_translation(center)
-            meshes.append(box)
-        
-        # Combine all case walls into one mesh
-        if meshes:
-            return trimesh.util.concatenate(meshes)
-        return None
+    def is_point_inside(self, mesh_index: int, point: Tuple[float, float, float]) -> bool:
+        """Check if point is inside mesh"""
+        mesh = self.get_mesh_at_position(mesh_index)
+        return mesh.contains([point])[0]
     
-    def _build_mainshaft_mesh(self, config):
-        """
-        Build mesh for mainshaft at given configuration.
-        Uses caching for performance.
-        """
-        # Create a cache key (rounded for tolerance)
-        cache_key = tuple(np.round(config, decimals=3))
+    def visualize(self):
+        """Visualize all meshes in 3D"""
+        scene = trimesh.Scene()
+        colors = [
+            [100, 100, 255, 180],  # Blue
+            [255, 100, 100, 180],  # Red
+            [100, 255, 100, 180],  # Green
+            [255, 255, 100, 180],  # Yellow
+        ]
         
-        # Check cache
-        if cache_key in self.mesh_cache:
-            return self.mesh_cache[cache_key]
+        for i, mesh in enumerate(self.meshes):
+            mesh_copy = mesh.copy()
+            mesh_copy.apply_translation(self.positions[i])
+            mesh_copy.visual.face_colors = colors[i % len(colors)]
+            scene.add_geometry(mesh_copy, node_name=self.names[i])
         
-        pos = config[:3]
-        quat = config[3:]  # [qw, qx, qy, qz]
-        r = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
-        
-        meshes = []
-        for cyl in self.mainshaft_cyls:
-            center = pos + r.apply(cyl.offset)
-            axis = r.apply([0, 0, 1])
-            
-            mesh = CylinderMesh.create(cyl.radius, cyl.height, center, axis)
-            meshes.append(mesh)
-        
-        if not meshes:
-            return None
-        
-        # Combine all mainshaft cylinders into one mesh
-        combined = trimesh.util.concatenate(meshes)
-        
-        # Cache management
-        if len(self.mesh_cache) >= self.cache_size:
-            # Remove oldest entry
-            oldest_key = next(iter(self.mesh_cache))
-            del self.mesh_cache[oldest_key]
-        
-        self.mesh_cache[cache_key] = combined
-        return combined
+        scene.show()
     
-    def is_collision_free(self, config, clearance=0.5):
-        """
-        Check if mainshaft at given config collides with any obstacles.
+    def print_report(self):
+        """Print collision report"""
+        print("\n" + "="*60)
+        print("3D COLLISION REPORT")
+        print("="*60)
         
-        Args:
-            config: 7D configuration [x,y,z,qw,qx,qy,qz]
-            clearance: Minimum allowed clearance in mm
+        print("\n📦 OBJECTS:")
+        for i, name in enumerate(self.names):
+            print(f"  {i}: {name} at {self.positions[i]}")
         
-        Returns:
-            True if collision-free, False otherwise
-        """
-        # Build mainshaft mesh
-        mainshaft_mesh = self._build_mainshaft_mesh(config)
-        if mainshaft_mesh is None:
-            return True
+        collisions = self.check_all_collisions()
         
-        # Check collision with countershaft
-        if self.countershaft_mesh is not None:
-            if mainshaft_mesh.intersects(self.countershaft_mesh):
-                return False
-            
-            # Optional: Check clearance distance
-            if clearance > 0:
-                dist = mainshaft_mesh.min_distance(self.countershaft_mesh)
-                if dist < clearance:
-                    return False
-        
-        # Check collision with case walls
-        if self.case_mesh is not None:
-            if mainshaft_mesh.intersects(self.case_mesh):
-                return False
-            
-            # Optional: Check clearance distance
-            if clearance > 0:
-                dist = mainshaft_mesh.min_distance(self.case_mesh)
-                if dist < clearance:
-                    return False
-        
-        return True
+        if not collisions:
+            print("\n✅ NO COLLISIONS")
+            print("\n📏 DISTANCES:")
+            n = len(self.meshes)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dist = self.distance_between(i, j)
+                    print(f"  {self.names[i]} ↔ {self.names[j]}: {dist:.3f}")
+        else:
+            print(f"\n❌ {len(collisions)} COLLISION(S):")
+            for i, j in collisions:
+                details = self.get_collision_details(i, j)
+                print(f"\n  🔴 {self.names[i]} ↔ {self.names[j]}")
+                print(f"     Penetration: {details['penetration_depth']:.3f}")
+                print(f"     Intersection volume: {details['intersection_volume']:.3f}")
     
-    def get_clearance(self, config):
-        """
-        Get minimum clearance distance to any obstacle.
-        
-        Args:
-            config: 7D configuration [x,y,z,qw,qx,qy,qz]
-        
-        Returns:
-            Minimum distance to any obstacle in mm
-        """
-        mainshaft_mesh = self._build_mainshaft_mesh(config)
-        if mainshaft_mesh is None:
-            return float('inf')
-        
-        min_dist = float('inf')
-        
-        # Distance to countershaft
-        if self.countershaft_mesh is not None:
-            dist = mainshaft_mesh.min_distance(self.countershaft_mesh)
-            if dist < min_dist:
-                min_dist = dist
-        
-        # Distance to case walls
-        if self.case_mesh is not None:
-            dist = mainshaft_mesh.min_distance(self.case_mesh)
-            if dist < min_dist:
-                min_dist = dist
-        
-        return min_dist
-    
-    def get_collision_details(self, config):
-        """
-        Get detailed collision information.
-        
-        Returns:
-            Dictionary with collision status and details
-        """
-        mainshaft_mesh = self._build_mainshaft_mesh(config)
-        if mainshaft_mesh is None:
-            return {'collision': False, 'details': 'No mesh'}
-        
-        result = {
-            'collision': False,
-            'countershaft_collision': False,
-            'case_collision': False,
-            'min_distance': float('inf')
-        }
-        
-        # Check countershaft
-        if self.countershaft_mesh is not None:
-            if mainshaft_mesh.intersects(self.countershaft_mesh):
-                result['collision'] = True
-                result['countershaft_collision'] = True
-            
-            dist = mainshaft_mesh.min_distance(self.countershaft_mesh)
-            if dist < result['min_distance']:
-                result['min_distance'] = dist
-        
-        # Check case
-        if self.case_mesh is not None:
-            if mainshaft_mesh.intersects(self.case_mesh):
-                result['collision'] = True
-                result['case_collision'] = True
-            
-            dist = mainshaft_mesh.min_distance(self.case_mesh)
-            if dist < result['min_distance']:
-                result['min_distance'] = dist
-        
-        return result
-
-
-# Global collision checker instance (to avoid rebuilding)
-_COLLISION_CHECKER = None
-
-def init_collision_checker(mainshaft_cyls, countershaft_cyls, case_walls, 
-                           countershaft_pose=None):
-    """
-    Initialize the global collision checker.
-    Call this once at the start of planning.
-    """
-    global _COLLISION_CHECKER
-    _COLLISION_CHECKER = CollisionChecker(
-        mainshaft_cyls, countershaft_cyls, case_walls, countershaft_pose
-    )
-    return _COLLISION_CHECKER
-
-def is_collision_free(config, mainshaft_cyls=None, countershaft_cyls=None, 
-                     case_walls=None, countershaft_pose=None):
-    """
-    Master collision check function.
-    Compatible with the original function signature.
-    """
-    global _COLLISION_CHECKER
-    
-    # Initialize if needed
-    if _COLLISION_CHECKER is None:
-        if mainshaft_cyls is None or countershaft_cyls is None or case_walls is None:
-            raise ValueError("Must provide geometry for first call or call init_collision_checker first")
-        
-        _COLLISION_CHECKER = CollisionChecker(
-            mainshaft_cyls, countershaft_cyls, case_walls, countershaft_pose
-        )
-    
-    return _COLLISION_CHECKER.is_collision_free(config)
-
-def get_clearance(config):
-    """Get minimum clearance for current configuration."""
-    if _COLLISION_CHECKER is None:
-        raise RuntimeError("Collision checker not initialized. Call init_collision_checker first.")
-    
-    return _COLLISION_CHECKER.get_clearance(config)
-
-
-# Backward compatibility functions (matching original interface)
-def transform_cylinder(cyl, position, quaternion):
-    """
-    Legacy function for backward compatibility.
-    Returns cylinder in world frame.
-    """
-    r = Rotation.from_quat([quaternion[1], quaternion[2], quaternion[3], quaternion[0]])
-    center_world = position + r.apply(cyl.offset)
-    axis_world = r.apply(np.array([0, 0, 1]))
-    return center_world, cyl.radius, cyl.height, axis_world
-
-def cylinder_cylinder_collision(c1_center, c1_r, c1_h, c1_axis,
-                                c2_center, c2_r, c2_h, c2_axis,
-                                clearance=0.5):
-    """
-    Legacy cylinder-cylinder collision function.
-    Uses trimesh for accurate detection.
-    """
-    # Create temporary meshes for the two cylinders
-    mesh1 = CylinderMesh.create(c1_r, c1_h, c1_center, c1_axis)
-    mesh2 = CylinderMesh.create(c2_r, c2_h, c2_center, c2_axis)
-    
-    # Check intersection
-    if mesh1.intersects(mesh2):
-        return True
-    
-    # Check clearance
-    if clearance > 0:
-        dist = mesh1.min_distance(mesh2)
-        return dist < clearance
-    
-    return False
-
-def cylinder_box_collision(cyl_center, cyl_r, cyl_h, cyl_axis, box, clearance=0.5):
-    """
-    Legacy cylinder-box collision function.
-    """
-    # Create cylinder mesh
-    cylinder = CylinderMesh.create(cyl_r, cyl_h, cyl_center, cyl_axis)
-    
-    # Create box mesh
-    center = (box.min + box.max) / 2
-    extents = (box.max - box.min) / 2
-    box_mesh = trimesh.creation.box(extents=extents)
-    box_mesh.apply_translation(center)
-    
-    # Check intersection
-    if cylinder.intersects(box_mesh):
-        return True
-    
-    # Check clearance
-    if clearance > 0:
-        dist = cylinder.min_distance(box_mesh)
-        return dist < clearance
-    
-    return False
+    def clear(self):
+        """Clear all meshes"""
+        self.meshes.clear()
+        self.names.clear()
+        self.positions.clear()
