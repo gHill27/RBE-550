@@ -19,7 +19,7 @@ SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
 
 # Apply the half-length offset to the START and GOAL
 # This centers the shaft mesh on the coordinate
-START = np.array([-350.0 + (PRIMARY_LENGTH / 2)+ 20, 0.0, BEARING_Z])
+START = np.array([-350.0 + (PRIMARY_LENGTH / 2)+ 40, 0.0, BEARING_Z])
 GOAL  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z])
 
 
@@ -45,7 +45,7 @@ def main():
     planner.checker.add_from_scad(
         'secondary_shaft.scad', 
         name='CounterShaft', 
-        position=(SECONDARY_LENGTH/2, 0, CS_BEARING_Z),
+        position=(SECONDARY_LENGTH/2 + 20, 0, CS_BEARING_Z),
         parameters={'part': 'countershaft'}
     )
 
