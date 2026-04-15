@@ -1,1 +1,5 @@
 __pycache__
+*.png
+.pytest_cache
+*.ini
+*.npy

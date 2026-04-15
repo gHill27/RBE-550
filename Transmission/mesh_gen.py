@@ -2,133 +2,169 @@
 """
 mesh_generator.py - Convert OpenSCAD files to 3D trimesh meshes
 """
-
 import subprocess
-import numpy as np
 import trimesh
+import trimesh.repair
 import tempfile
 from pathlib import Path
-from typing import Union, Optional, Dict
+from typing import Optional, Dict
+
 
 class MeshGenerator:
     """Generate 3D trimesh objects from OpenSCAD files"""
-    
+
     def __init__(self, models_folder: str = 'models'):
         """
         Initialize mesh generator.
-        
+
         Args:
             models_folder: Folder containing OpenSCAD models
         """
         self.models_folder = Path(models_folder)
-        
-        # If models_folder doesn't exist, try current directory
+        self.openscad_bin: str = ''
+
         if not self.models_folder.exists():
             self.models_folder = Path.cwd()
             print(f"⚠️  Models folder not found, using current directory: {self.models_folder}")
         else:
             print(f"✓ Found models folder at: {self.models_folder}")
-        
+
         self._check_openscad()
-    
+
     def _check_openscad(self):
-        """Verify OpenSCAD is installed"""
-        try:
-            result = subprocess.run(['openscad', '--version'], 
-                                   capture_output=True, check=True)
-            print("✓ OpenSCAD found")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            raise RuntimeError("OpenSCAD not found. Please install OpenSCAD first.")
-    
-    def from_scad(self, 
-                  scad_file: Union[str, Path], 
-                  parameters: Optional[Dict] = None,
-                  scale_factor: float = 1.0,
-                  fix_mesh: bool = False) -> trimesh.Trimesh:
+        """Verify OpenSCAD is installed, preferring the nightly build."""
+        for binary in ['openscad-nightly', 'openscad']:
+            try:
+                result = subprocess.run(
+                    [binary, '--version'], capture_output=True, text=True, check=True
+                )
+                self.openscad_bin = binary
+                version = result.stderr.strip() or result.stdout.strip()
+                print(f"✓ OpenSCAD found: {binary} ({version})")
+                return
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+        raise RuntimeError(
+            "OpenSCAD not found. Install via: sudo apt install openscad-nightly"
+        )
+
+    def from_scad(
+        self,
+        scad_file: str,
+        parameters: Optional[Dict] = None,
+        scale_factor: float = 1.0,
+        fix_mesh: bool = False,
+    ) -> trimesh.Trimesh:
         """
-        Convert OpenSCAD file to 3D mesh.
-        
+        Convert an OpenSCAD file to a 3D trimesh.
+
         Args:
-            scad_file: Name of OpenSCAD file (will look in models_folder)
-            parameters: Dictionary of parameters (-D var=value)
-            scale_factor: Scale factor for coordinates
-            fix_mesh: Whether to try fixing mesh issues (ignored in this version)
+            scad_file:     Filename of the .scad file (relative to models_folder).
+            parameters:    Optional dict of OpenSCAD variables to override via -D flags,
+                           e.g. {'bearing_radius': 45, 'case_height': 320}.
+            scale_factor:  Uniform scale applied after loading (default 1.0 = no change).
+            fix_mesh:      If True, attempt to repair normals and fill holes so the mesh
+                           becomes watertight (enables volume calculation).
+
+        Returns:
+            A trimesh.Trimesh object.
         """
-        # Build full path to SCAD file
         scad_path = self.models_folder / scad_file
-        
         if not scad_path.exists():
-            # Try just the filename as fallback
-            scad_path = Path(scad_file)
-            if not scad_path.exists():
-                # List available files for debugging
-                available = list(self.models_folder.glob("*.scad"))
-                print(f"\n❌ File not found: {scad_file}")
-                print(f"   Looking in: {self.models_folder}")
-                if available:
-                    print(f"   Available SCAD files:")
-                    for f in available:
-                        print(f"     - {f.name}")
-                raise FileNotFoundError(f"OpenSCAD file not found: {scad_file}")
-        
+            raise FileNotFoundError(f"File not found: {scad_path}")
+
         print(f"📄 Loading: {scad_path}")
-        
-        # Build command
-        cmd = ['openscad']
-        
-        # Add parameters
-        if parameters:
-            for key, value in parameters.items():
-                if isinstance(value, str):
-                    cmd.extend(['-D', f'{key}="{value}"'])
-                else:
-                    cmd.extend(['-D', f'{key}={value}'])
-        
-        # Export to temporary STL
+
         with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
             stl_file = tmp.name
-        
+
         try:
-            cmd.extend(['-o', stl_file, '--export-format', 'stl', str(scad_path)])
+            # Build the OpenSCAD command, injecting any parameter overrides
+            cmd = [self.openscad_bin, '-o', stl_file, str(scad_path)]
+            if parameters:
+                for key, val in parameters.items():
+                    cmd += ['-D', f'{key}={val}']
+
             result = subprocess.run(cmd, capture_output=True, text=True)
-            
+
+            # Surface non-fatal warnings even on success
+            if result.stderr.strip():
+                label = "OpenSCAD stderr" if result.returncode != 0 else "OpenSCAD warnings"
+                # print(f"⚠️  {label}:\n{result.stderr.strip()}")
+
             if result.returncode != 0:
-                raise RuntimeError(f"OpenSCAD export failed: {result.stderr}")
-            
-            # Load mesh
-            mesh = trimesh.load_mesh(stl_file)
-            
-            # Apply scale
+                raise RuntimeError("OpenSCAD export failed (see stderr above)")
+
+            # Load mesh — guard against Scene results (multi-body exports)
+            loaded = trimesh.load(stl_file)
+            if isinstance(loaded, trimesh.Scene):
+                print("ℹ️  Scene detected, concatenating all bodies into one mesh")
+                mesh = trimesh.util.concatenate(loaded.dump())
+            else:
+                mesh = loaded
+
+            if len(mesh.vertices) == 0:
+                raise RuntimeError("Mesh has 0 vertices — SCAD file may have errors")
+
+            # Optionally attempt mesh repair
+            if fix_mesh:
+                print("🔧 Attempting mesh repair...")
+                trimesh.repair.fix_normals(mesh)
+                trimesh.repair.fill_holes(mesh)
+                if mesh.is_watertight:
+                    print("✓ Mesh is now watertight")
+                else:
+                    print("⚠️  Mesh could not be made fully watertight")
+
             if scale_factor != 1.0:
                 mesh.apply_scale(scale_factor)
-            
-            # Optionally fix mesh (if requested)
-            if fix_mesh:
-                try:
-                    # Remove degenerate faces if they exist
-                    if hasattr(mesh, 'degenerate_faces'):
-                        mesh.update_faces(~mesh.degenerate_faces)
-                    # Merge duplicate vertices
-                    mesh.merge_vertices()
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not fix mesh: {e}")
-            
+                print(f"✓ Scale factor {scale_factor} applied")
+
             return mesh
-            
+
         finally:
             Path(stl_file).unlink(missing_ok=True)
-    
+
     def get_mesh_info(self, mesh: trimesh.Trimesh) -> Dict:
         """Get detailed information about 3D mesh"""
-        return {
-            'vertices': len(mesh.vertices),
-            'faces': len(mesh.faces),
-            'edges': len(mesh.edges),
-            'volume': mesh.volume if mesh.is_watertight else 0,
-            'surface_area': mesh.area,
-            'is_watertight': mesh.is_watertight,
-            'is_convex': mesh.is_convex,
-            'bounds': mesh.bounds.tolist(),
-            'extents': mesh.extents.tolist(),
-            'center_of_mass': mesh.center_mass.tolist(),
-        }
+        try:
+            # Handle volume - will be None for non-watertight meshes
+            volume = mesh.volume if hasattr(mesh, 'volume') and mesh.volume is not None else 0.0
+            if volume is None:
+                volume = 0.0
+                
+            # Handle bounds
+            bounds = mesh.bounds.tolist() if mesh.bounds is not None else [[0,0,0], [0,0,0]]
+            
+            # Handle extents
+            extents = mesh.extents.tolist() if mesh.extents is not None else [0,0,0]
+            
+            # Handle center of mass
+            center_mass = mesh.center_mass.tolist() if hasattr(mesh, 'center_mass') and mesh.center_mass is not None else [0,0,0]
+            
+            return {
+                'vertices': len(mesh.vertices),
+                'faces': len(mesh.faces),
+                'edges': len(mesh.edges),
+                'volume': volume,
+                'surface_area': mesh.area if hasattr(mesh, 'area') else 0.0,
+                'is_watertight': mesh.is_watertight if hasattr(mesh, 'is_watertight') else False,
+                'is_convex': mesh.is_convex if hasattr(mesh, 'is_convex') else False,
+                'bounds': bounds,
+                'extents': extents,
+                'center_of_mass': center_mass,
+            }
+        except Exception as e:
+            print(f"Warning: Could not get mesh info: {e}")
+            return {
+                'vertices': len(mesh.vertices),
+                'faces': len(mesh.faces),
+                'edges': 0,
+                'volume': 0.0,
+                'surface_area': 0.0,
+                'is_watertight': False,
+                'is_convex': False,
+                'bounds': [[0,0,0], [0,0,0]],
+                'extents': [0,0,0],
+                'center_of_mass': [0,0,0],
+            }

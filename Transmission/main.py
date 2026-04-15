@@ -1,180 +1,125 @@
 #!/usr/bin/env python3
-"""
-main.py - Main script for transmission shaft path planning
-"""
-
 import sys
-import os
 from pathlib import Path
-
-# Add current directory to path (in case of import issues)
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Import your modules
-from mesh_gen import MeshGenerator
-from collision import CollisionChecker3D
 from planner import RRTPlanner3D
-
 import numpy as np
 
-def check_environment():
-    """Check if everything is set up correctly"""
-    print("="*60)
-    print("ENVIRONMENT CHECK")
-    print("="*60)
-    
-    # Check current directory
-    cwd = Path.cwd()
-    print(f"\n📁 Current directory: {cwd}")
-    
-    # List contents
-    print(f"\n📋 Directory contents:")
-    for item in cwd.iterdir():
-        if item.is_dir():
-            print(f"  📁 {item.name}/")
-        else:
-            print(f"  📄 {item.name}")
-    
-    # Check for models folder
-    models_path = cwd / 'models'
-    if models_path.exists():
-        print(f"\n✅ Found 'models' folder!")
-        print(f"   Contents:")
-        for item in models_path.iterdir():
-            if item.suffix == '.scad':
-                print(f"     - {item.name}")
-    else:
-        print(f"\n❌ 'models' folder not found at: {models_path}")
-        
-        # Check parent directory
-        parent_models = cwd.parent / 'models'
-        if parent_models.exists():
-            print(f"   Found 'models' in parent directory: {parent_models}")
-            print(f"   Consider moving 'models' to current directory or updating path")
-        else:
-            print(f"\n   Please create a 'models' folder and put your SCAD files in it:")
-            print(f"   mkdir models")
-            print(f"   # Then copy your .scad files into models/")
-    
-    return models_path.exists()
+# ---------------------------------------------------------------------------
+# Geometry constants (mm)
+# ---------------------------------------------------------------------------
+CASE_THICKNESS  = 25
+CASE_HEIGHT     = 300
+BEARING_OFFSET  = 215
+BEARING_Z       = BEARING_OFFSET + (CASE_THICKNESS / 2)   
+CS_BEARING_Z    = 100 + CASE_THICKNESS / 2   
+PRIMARY_LENGTH = 330
+SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
+
+# Apply the half-length offset to the START and GOAL
+# This centers the shaft mesh on the coordinate
+START = np.array([-350.0 + (PRIMARY_LENGTH / 2)+ 20, 0.0, BEARING_Z])
+GOAL  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z])
+
 
 def main():
-    """Main function for transmission path planning"""
+    # 1. Define Search Space Bounds
+    # x: [-400, 100], y: [-100, 100], z:
+    bounds = [(-400, 100), (-100, 100), (0, 300)]
     
-    print("="*60)
-    print("TRANSMISSION SHAFT PATH PLANNING")
-    print("="*60)
-    
-    # Check environment first
-    if not check_environment():
-        print("\n❌ Cannot proceed without models folder!")
-        return
-    
-    # Transmission parameters (from your SCAD)
-    case_length = 280
-    case_width = 210
-    case_height = 300
-    bearing_offset_height = 215
-    cs_bearing_offset_height = 100
-    case_thickness = 25
-    
-    # Calculate positions
-    primary_shaft_start = (-150, 0, bearing_offset_height + 0.5 * case_thickness)
-    secondary_shaft_position = (
-        0.5 * case_length + case_thickness,  # ~165
-        0,
-        cs_bearing_offset_height + 0.5 * case_thickness  # ~112.5
+    # 2. Initialize Planner
+    planner = RRTPlanner3D(bounds=bounds, models_folder='models')
+
+    # 3. Add Obstacles (Fixed items in the CollisionManager)
+    # The transmission case has the bearing holes
+    print("Loading obstacles...")
+    planner.checker.add_from_scad(
+        'transmission_case.scad', 
+        name='TransmissionCase', 
+        position=(0, 0, 0),
+        parameters={'part': 'case'}
     )
-    goal_position = (150, 0, bearing_offset_height + 0.5 * case_thickness)
     
-    # Define planning bounds
-    bounds = [
-        (-200, 200),  # X: wider than case
-        (-150, 150),  # Y: wider than case
-        (0, 350)      # Z: cover bearing height
-    ]
+    # Add the countershaft if it's already installed
+    planner.checker.add_from_scad(
+        'secondary_shaft.scad', 
+        name='CounterShaft', 
+        position=(SECONDARY_LENGTH/2, 0, CS_BEARING_Z),
+        parameters={'part': 'countershaft'}
+    )
+
+    # 4. Set the Robot (The Primary Shaft)
+    # This now registers the mesh as "robot" in the CollisionManager
+    print("Loading primary shaft (robot)...")
+    planner.set_robot(
+        scad_file='primary_shaft.scad',
+        start_position=START
+    )
     
-    print(f"\n📍 Positions:")
-    print(f"   Primary shaft start: {primary_shaft_start}")
-    print(f"   Secondary shaft: {secondary_shaft_position}")
-    print(f"   Goal: {goal_position}")
-    
-    try:
-        # Initialize planner
-        print(f"\n🔧 Initializing planner...")
-        planner = RRTPlanner3D(
-            bounds=bounds,
-            models_folder='models'  # Your SCAD files are in this folder
-        )
-        
-        # Add obstacles
-        print(f"\n📦 Loading obstacles from 'models' folder...")
-        
-        # Add transmission case
-        planner.add_obstacle(
-            'transmission_case.scad',  # Should exist in models/
-            'Case',
-            position=(0, 0, 0)
-        )
-        
-        # Add countershaft (secondary shaft)
-        planner.add_obstacle(
-            'secondary_shaft.scad',  # Should exist in models/
-            'Countershaft',
-            position=secondary_shaft_position
-        )
-        
-        # Set robot (primary shaft / mainshaft)
-        print(f"\n🤖 Loading robot (mainshaft)...")
-        planner.set_robot(
-            scad_file='primary_shaft.scad',  # Should exist in models/
-            start_position=primary_shaft_start
-        )
-        
-        # Plan path
-        waypoints = planner.plan_path(
-            start=primary_shaft_start,
-            goal=goal_position,
-            planner_type='rrt_connect',
-            max_time=10.0,
-            goal_tolerance=5.0
-        )
-        
-        if waypoints:
-            print(f"\n✅ Success! Found path with {len(waypoints)} waypoints")
-            
-            # Check if path goes through hole
-            hole_center = np.array([152.5, 0, 215])
-            path_array = np.array(waypoints)
-            distances = np.linalg.norm(path_array[:, :3] - hole_center, axis=1)
-            min_distance = np.min(distances)
-            
-            if min_distance < 40:
-                print(f"✓ Path goes through bearing hole (clearance: {40 - min_distance:.1f}mm)")
-            else:
-                print(f"⚠️ Path may not go through hole (distance: {min_distance:.1f}mm)")
-            
-            # Save path
-            np.save('planned_path.npy', path_array)
-            print("✓ Path saved to 'planned_path.npy'")
-            
-            # Ask to visualize
-            response = input("\n🎨 Visualize path? (y/n): ")
-            if response.lower() == 'y':
-                planner.visualize_path(waypoints)
+
+    print("\n--- Diagnostic Visualization ---")
+    planner.checker.update_position("robot", START)
+
+    # return_names=True returns a set of frozensets/tuples
+    collisions = planner.checker.manager.in_collision_internal(return_names=True)
+
+    if collisions:
+        print(f"🚨 START STATE COLLISION DETECTED")
+        # Check if 'collisions' is a collection of names or just a True/False
+        if isinstance(collisions, (set, list, frozenset)):
+            for pair in collisions:
+                pair_list = list(pair)
+                if len(pair_list) == 2:
+                    n1, n2 = pair_list
+                    dist = planner.checker.manager.min_distance_other(n1, n2)
+                    print(f"   -> {n1} ↔ {n2} | Distance: {dist:.4f}mm")
         else:
-            print("\n❌ Failed to find path!")
-            
-    except FileNotFoundError as e:
-        print(f"\n❌ File error: {e}")
-        print("\nPlease make sure your models folder contains:")
-        print("  - transmission_case.scad")
-        print("  - secondary_shaft.scad")
-        print("  - primary_shaft.scad")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+            # It's just a boolean True
+            print("   -> Collision exists, but trimesh didn't return specific names.")
+    else:
+        print("✅ Start state is clear.")
+
+    planner.checker.visualize()
+    # 5. Plan Path
+    # The validity checker now uses manager.update_position("robot", state)
+    print(f"\nPlanning from {START} to {GOAL}...")
+    waypoints = planner.plan_path(
+        start=START,
+        goal=GOAL,
+        planner_type='rrt_connect',
+        max_time=60.0,
+        goal_tolerance=5.0
+    )
+
+    # 6. Result Handling
+    if waypoints:
+        print(f"✅ Success! Path found with {len(waypoints)} waypoints.")
+        planner.save_path(waypoints, 'planned_path.npy')
+        
+        if input("\nVisualize result? (y/n): ").lower() == 'y':
+            planner.visualize_path(waypoints)
+    else:
+        print("❌ No path found. Check if the start/goal are in collision.")
+
+# Add this to main.py
+def run_diagnostic(planner, start_pos):
+    print("\n--- Diagnostic Visualization ---")
+    print(f"Testing Start Position: {start_pos}")
+    
+    # Update manager to check this specific state
+    planner.checker.update_position("robot", start_pos)
+    
+    # Check for collisions
+    is_colliding = planner.checker.manager.in_collision_internal()
+    if is_colliding:
+        colliding_pairs = planner.checker.manager.in_collision_internal(return_names=True)
+        print(f"🚨 COLLISION DETECTED at start: {colliding_pairs}")
+    else:
+        print("✅ Start position is VALID and CLEAR.")
+
+    print("Opening 3D visualizer... (Close window to proceed)")
+    planner.checker.visualize()
 
 
 if __name__ == "__main__":

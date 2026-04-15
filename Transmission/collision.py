@@ -11,32 +11,70 @@ from mesh_gen import MeshGenerator
 
 class CollisionChecker3D:
     """3D collision detection between multiple meshes"""
-    
     def __init__(self, models_folder: str = 'models'):
-        """
-        Initialize collision checker.
-        
-        Args:
-            models_folder: Folder containing OpenSCAD models
-        """
-        self.meshes = []
-        self.names = []
-        self.positions = []
         self.mesh_generator = MeshGenerator(models_folder=models_folder)
-    
+        # The manager handles all the narrow-phase geometry logic
+        self.manager = trimesh.collision.CollisionManager()
+        self.names = []
+        self.meshes = []
+        self.added_meshes = {}
+        self.current_poses = {}
+
     def add_mesh(self, mesh: trimesh.Trimesh, name: str = None, 
                  position: Tuple[float, float, float] = (0, 0, 0)):
-        """Add a mesh at specified position"""
+        """Add a mesh and register it with the CollisionManager"""
+        name = name or f"Mesh_{len(self.names)}"
+        
+        # Create a 4x4 transformation matrix for the manager
+        transform = np.eye(4)
+        transform[:3, 3] = position
+        
+        # Add to the manager (this builds the internal BVH tree)
+        self.manager.add_object(name, mesh, transform=transform)
+        
         self.meshes.append(mesh)
-        self.names.append(name or f"Mesh_{len(self.meshes)}")
-        self.positions.append(np.array(position))
-        print(f"✓ Added '{self.names[-1]}' at {position}")
+        self.names.append(name)
+        self.added_meshes[name] = mesh
+        self.current_poses[name] = transform
+        # print(f"✓ Added '{name}' to CollisionManager at {position}")
+
+    def update_position(self, name: str, position: Tuple[float, float, float]):
+        """Efficiently move an existing mesh without re-adding it"""
+        transform = np.eye(4)
+        transform[:3, 3] = position
+        self.manager.set_transform(name, transform)
+        self.current_poses[name] = transform
+
+    def check_collision(self, name1: str, name2: str) -> bool:
+        """Check if two specific meshes collide (triangle-accurate)"""
+        return self.manager.in_collision_other(name1, name2)
+        
+
+    def check_all_collisions(self) -> List[Tuple[str, str]]:
+        """Check all objects in the scene for any collisions"""
+        # Returns a set of tuples containing the names of colliding objects
+        collisions = self.manager.in_collision_internal(return_names=True)
+        return list(collisions)
+
+    def get_collision_details(self, name1: str, name2: str) -> Dict:
+        """Get precise distance and penetration info"""
+        # min_distance_other returns the actual Euclidean distance between meshes
+        # If the meshes are intersecting, it may return 0 or a very small number
+        distance = self.manager.min_distance_other(name1, name2)
+        
+        is_colliding = distance <= 0
+        
+        return {
+            'collision': is_colliding,
+            'distance': distance,
+            'meshes': (name1, name2)
+        }
     
     def add_from_scad(self, scad_file: str, name: str = None,
                       position: Tuple[float, float, float] = (0, 0, 0),
                       parameters: Dict = None,
                       fix_mesh: bool = False):
-        """Load and add mesh from OpenSCAD file"""
+        """Standard wrapper to load SCAD via MeshGenerator"""
         try:
             mesh = self.mesh_generator.from_scad(
                 scad_file, 
@@ -48,130 +86,17 @@ class CollisionChecker3D:
             print(f"❌ Failed to load {scad_file}: {e}")
             raise
     
-    def get_mesh_at_position(self, index: int) -> trimesh.Trimesh:
-        """Get mesh transformed to its position"""
-        mesh = self.meshes[index].copy()
-        mesh.apply_translation(self.positions[index])
-        return mesh
-    
-    def check_collision(self, index1: int, index2: int, use_bvh: bool = True) -> bool:
-        """Check if two meshes collide"""
-        try:
-            mesh1 = self.get_mesh_at_position(index1)
-            mesh2 = self.get_mesh_at_position(index2)
-            
-            if use_bvh:
-                return mesh1.intersects_mesh(mesh2)
-            else:
-                # Simple bounding box check first (faster for quick rejection)
-                if not mesh1.bounds.intersects(mesh2.bounds):
-                    return False
-                return mesh1.intersects_mesh(mesh2)
-                
-        except Exception as e:
-            print(f"⚠️  Collision check failed: {e}")
-            return False
-    
-    def check_all_collisions(self) -> List[Tuple[int, int]]:
-        """Check all pairs for collisions"""
-        collisions = []
-        n = len(self.meshes)
-        
-        for i in range(n):
-            for j in range(i + 1, n):
-                if self.check_collision(i, j):
-                    collisions.append((i, j))
-        
-        return collisions
-    
-    def get_collision_details(self, index1: int, index2: int) -> Dict:
-        """Get detailed collision information"""
-        mesh1 = self.get_mesh_at_position(index1)
-        mesh2 = self.get_mesh_at_position(index2)
-        
-        intersects = mesh1.intersects_mesh(mesh2)
-        
-        if intersects:
-            try:
-                intersection = mesh1.intersection(mesh2)
-                intersection_volume = intersection.volume if hasattr(intersection, 'volume') else 0
-                penetration = -mesh1.min_distance(mesh2)
-            except:
-                intersection_volume = 0
-                penetration = 0
-            
-            return {
-                'collision': True,
-                'penetration_depth': penetration,
-                'intersection_volume': intersection_volume,
-                'meshes': (self.names[index1], self.names[index2])
-            }
-        else:
-            distance = mesh1.min_distance(mesh2)
-            return {
-                'collision': False,
-                'distance': distance,
-                'meshes': (self.names[index1], self.names[index2])
-            }
-    
-    def distance_between(self, index1: int, index2: int) -> float:
-        """Get minimum distance between two meshes (negative if intersecting)"""
-        mesh1 = self.get_mesh_at_position(index1)
-        mesh2 = self.get_mesh_at_position(index2)
-        
-        if mesh1.intersects_mesh(mesh2):
-            return -mesh1.min_distance(mesh2)
-        else:
-            return mesh1.min_distance(mesh2)
-    
     def visualize(self):
-        """Visualize all meshes in 3D"""
+        """Visualizes using our locally tracked data to avoid AttributeError"""
         scene = trimesh.Scene()
-        colors = [
-            [100, 100, 255, 180],  # Blue
-            [255, 100, 100, 180],  # Red
-            [100, 255, 100, 180],  # Green
-            [255, 255, 100, 180],  # Yellow
-        ]
-        
-        for i, mesh in enumerate(self.meshes):
-            mesh_copy = mesh.copy()
-            mesh_copy.apply_translation(self.positions[i])
-            mesh_copy.visual.face_colors = colors[i % len(colors)]
-            scene.add_geometry(mesh_copy, node_name=self.names[i])
-        
+        for name in self.names:
+            mesh = self.added_meshes[name]
+            transform = self.current_poses[name]
+            scene.add_geometry(mesh, node_name=name, transform=transform)
+        print("--- Rendering 3D Scene ---")
         scene.show()
-    
-    def print_report(self):
-        """Print collision report"""
-        print("\n" + "="*60)
-        print("3D COLLISION REPORT")
-        print("="*60)
         
-        print("\n📦 OBJECTS:")
-        for i, name in enumerate(self.names):
-            print(f"  {i}: {name} at {self.positions[i]}")
-        
-        collisions = self.check_all_collisions()
-        
-        if not collisions:
-            print("\n✅ NO COLLISIONS")
-            print("\n📏 DISTANCES:")
-            n = len(self.meshes)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    dist = self.distance_between(i, j)
-                    print(f"  {self.names[i]} ↔ {self.names[j]}: {dist:.3f}")
-        else:
-            print(f"\n❌ {len(collisions)} COLLISION(S):")
-            for i, j in collisions:
-                details = self.get_collision_details(i, j)
-                print(f"\n  🔴 {self.names[i]} ↔ {self.names[j]}")
-                print(f"     Penetration: {details['penetration_depth']:.3f}")
-                print(f"     Intersection volume: {details['intersection_volume']:.3f}")
-    
     def clear(self):
-        """Clear all meshes"""
-        self.meshes.clear()
+        self.manager = trimesh.collision.CollisionManager()
         self.names.clear()
-        self.positions.clear()
+        self.meshes.clear()
