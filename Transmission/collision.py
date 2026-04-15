@@ -46,6 +46,25 @@ class CollisionChecker3D:
         self.current_poses[name] = transform
 
     
+    def check_mesh_against_manager(self, mesh: trimesh.Trimesh,
+                                   transform: np.ndarray) -> bool:
+        """
+        Check if a single mesh (e.g., robot) collides with any object
+        currently in the manager (static obstacles).
+        Returns True if collision detected.
+        """
+        return self.manager.in_collision_single(mesh, transform)
+
+    def min_distance_to_environment(self, mesh: trimesh.Trimesh,
+                                    transform: np.ndarray) -> float:
+        """
+        Return the minimum distance between the given mesh (at `transform`)
+        and any object in the manager. Positive = separated, 0 = touching,
+        negative = penetration depth.
+        """
+        return self.manager.min_distance_single(mesh, transform)
+
+
     def check_collision(self, name1: str, name2: str) -> bool:
         mesh1 = self.added_meshes[name1]
         transform1 = self.current_poses[name1]
@@ -56,19 +75,37 @@ class CollisionChecker3D:
         return temp.in_collision_single(mesh1, transform1)
         
 
-    def check_all_collisions(self) -> List[Tuple[str, str]]:
-        """Check all objects in the scene for any collisions"""
-        # Returns a set of tuples containing the names of colliding objects
-        collisions = self.manager.in_collision_internal(return_names=True)
-        return list(collisions)
+    def check_all_collisions(self) -> set:
+        """
+        Return a set of unordered pairs (tuple) that are colliding.
+        Example: {('robot', 'Case'), ('shaft', 'bearing')}
+        """
+        colliding_pairs = set()
+        names = list(self.added_meshes.keys())
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                if self.check_collision(names[i], names[j]):
+                    # store as sorted tuple to avoid duplicates
+                    colliding_pairs.add(tuple(sorted((names[i], names[j]))))
+        return colliding_pairs
 
-    def get_collision_details(self, name1: str, name2: str) -> Dict:
-        temp = trimesh.collision.CollisionManager()
-        temp.add_object(name2, self.added_meshes[name2], self.current_poses[name2])
-        distance = self.manager.min_distance_other(temp)
-        is_colliding = distance <= 0
-        return {'collision': is_colliding, 'distance': distance, 'meshes': (name1, name2)}
-
+    def get_collision_details(self, name1: str, name2: str) -> dict:
+        """Return distance and collision status for the given pair."""
+        is_colliding = self.check_collision(name1, name2)
+        # distance is positive if not colliding, 0.0 if touching, negative if interpenetrating
+        # Compute exact distance using trimesh's mesh.min_distance
+        mesh1 = self.added_meshes[name1]
+        transform1 = self.current_poses[name1]
+        mesh2 = self.added_meshes[name2]
+        transform2 = self.current_poses[name2]
+        # min_distance accepts transforms for both meshes
+        distance = mesh1.min_distance(mesh2, transform=transform1,
+                                      transform_other=transform2)
+        return {
+            'collision': is_colliding,
+            'distance': distance,
+            'meshes': (name1, name2)
+        }
     
     def add_from_scad(self, scad_file: str, name: str = None,
                       position: Tuple[float, float, float] = (0, 0, 0),
@@ -86,14 +123,15 @@ class CollisionChecker3D:
             print(f"❌ Failed to load {scad_file}: {e}")
             raise
     
-    def visualize(self):
-        """Visualizes using our locally tracked data to avoid AttributeError"""
+    def visualize(self, robot_mesh: trimesh.Trimesh = None,
+              robot_transform: np.ndarray = None):
         scene = trimesh.Scene()
         for name in self.names:
             mesh = self.added_meshes[name]
             transform = self.current_poses[name]
             scene.add_geometry(mesh, node_name=name, transform=transform)
-        print("--- Rendering 3D Scene ---")
+        if robot_mesh is not None and robot_transform is not None:
+            scene.add_geometry(robot_mesh, node_name="robot", transform=robot_transform)
         scene.show()
         
     def clear(self):

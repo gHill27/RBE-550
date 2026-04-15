@@ -60,22 +60,22 @@ def main():
     )
 
 
-    pos = tuple(START)
-    planner.checker.update_position("robot", pos)
-    robot_mesh = planner.checker.added_meshes["robot"]
-    robot_transform = planner.checker.current_poses["robot"]
+    # pos = tuple(START)
+    # planner.checker.update_position("robot", pos)
+    # robot_mesh = planner.checker.added_meshes["robot"]
+    # robot_transform = planner.checker.current_poses["robot"]
 
-    for name, mesh in planner.checker.added_meshes.items():
-        if name == "robot":
-            continue
-        temp = trimesh.collision.CollisionManager()
-        temp.add_object(name, mesh, planner.checker.current_poses[name])
-        hit = temp.in_collision_single(robot_mesh, robot_transform)
-        print(f"  robot vs {name}: {'COLLISION' if hit else 'clear'}")
+    # for name, mesh in planner.checker.added_meshes.items():
+    #     if name == "robot":
+    #         continue
+    #     temp = trimesh.collision.CollisionManager()
+    #     temp.add_object(name, mesh, planner.checker.current_poses[name])
+    #     hit = temp.in_collision_single(robot_mesh, robot_transform)
+    #     print(f"  robot vs {name}: {'COLLISION' if hit else 'clear'}")
     
 
     print("\n--- Diagnostic Visualization ---")
-    planner.checker.update_position("robot", START)
+    # planner.checker.update_position("robot", START)
 
     # Use the helper method from your CollisionChecker3D class
     
@@ -84,7 +84,9 @@ def main():
         print(f"🚨 Collisions at start: {collisions}")
     else:
         print("✅ Start position clear.")
-    planner.checker.visualize()
+    robot_transform = np.eye(4)
+    robot_transform[:3, 3] = START
+    planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
 
     # 5. Plan Path
     # The validity checker now uses manager.update_position("robot", state)
@@ -93,7 +95,7 @@ def main():
         start=START,
         goal=GOAL,
         planner_type='rrt_connect',
-        max_time=60.0,
+        max_time= 10.0,
         goal_tolerance=5.0
     )
 
@@ -106,6 +108,19 @@ def main():
             planner.visualize_path(waypoints)
     else:
         print("❌ No path found. Check if the start/goal are in collision.")
+    
+    if waypoints is None:
+        print("Checking start validity directly:")
+        start_transform = np.eye(4)
+        start_transform[:3,3] = START
+        print("Start valid?", not planner.checker.check_mesh_against_manager(planner.robot_mesh, start_transform))
+
+        print("Checking goal validity directly:")
+        goal_transform = np.eye(4)
+        goal_transform[:3,3] = GOAL
+        print("Goal valid?", not planner.checker.check_mesh_against_manager(planner.robot_mesh, goal_transform))
+        print("Number of obstacles in manager:", len(planner.checker.manager._names))
+        print("Robot mesh vertices:", len(planner.robot_mesh.vertices))
 
 # Add this to main.py
 def run_diagnostic(planner, start_pos):

@@ -72,7 +72,7 @@ class RRTPlanner3D:
         
         # --- NEW: Register the robot with the collision manager ---
         # We give it a fixed name "robot" so we can move it later
-        self.checker.add_mesh(self.robot_mesh, name="robot", position=start_position)
+        # self.checker.add_mesh(self.robot_mesh, name="robot", position=start_position)
         self.si.setStateValidityCheckingResolution(0.01)
         
         class ValidityChecker(ob.StateValidityChecker):
@@ -88,26 +88,21 @@ class RRTPlanner3D:
     
     def _is_state_valid(self, state) -> bool:
         pos = (float(state[0]), float(state[1]), float(state[2]))
-        self.checker.update_position("robot", pos)
+        transform = np.eye(4)
+        transform[:3, 3] = pos
+
+        # Check robot against all obstacles in the manager
+
+        # robot_mesh = self.checker.added_meshes["robot"]
+        # robot_transform = self.checker.current_poses["robot"]
+        return not self.checker.check_mesh_against_manager(self.robot_mesh, transform)
         
-        robot_mesh = self.checker.added_meshes["robot"]
-        robot_transform = self.checker.current_poses["robot"]
-        
-        for name, mesh in self.checker.added_meshes.items():
-            if name == "robot":
-                continue
-            transform = self.checker.current_poses[name]
-            temp = trimesh.collision.CollisionManager()
-            temp.add_object(name, mesh, transform)
-            if temp.in_collision_single(robot_mesh, robot_transform):
-                return False
-        return True
         
     
     def plan_path(self, 
                   start: Tuple[float, float, float],
                   goal: Tuple[float, float, float],
-                  planner_type: str = 'rrt_connect',
+                  planner_type: str = 'rrt_star',
                   max_time: float = 5.0,
                   goal_tolerance: float = 0.1) -> Optional[List[np.ndarray]]:
         """
@@ -152,6 +147,7 @@ class RRTPlanner3D:
             planner = og.RRTConnect(self.si)
         
         planner.setProblemDefinition(pdef)
+        planner.setRange(0.2) #0.2mm steps
         
         # Plan
         print(f"\n🚀 Planning with {planner_type.upper()}...")
