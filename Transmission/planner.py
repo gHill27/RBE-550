@@ -61,6 +61,8 @@ class RRTPlanner3D:
         if scad_file:
             generator = MeshGenerator(models_folder=self.models_folder)
             self.robot_mesh = generator.from_scad(scad_file)
+
+            # self.robot_mesh.apply_translation(-self.robot_mesh.center_mass)
         elif radius:
             self.robot_mesh = trimesh.primitives.Sphere(radius=radius)
         else:
@@ -71,6 +73,7 @@ class RRTPlanner3D:
         # --- NEW: Register the robot with the collision manager ---
         # We give it a fixed name "robot" so we can move it later
         self.checker.add_mesh(self.robot_mesh, name="robot", position=start_position)
+        self.si.setStateValidityCheckingResolution(0.01)
         
         class ValidityChecker(ob.StateValidityChecker):
             def __init__(self, si, planner):
@@ -84,15 +87,21 @@ class RRTPlanner3D:
         self.si.setup()
     
     def _is_state_valid(self, state) -> bool:
-        # 1. Extract and sanitize state (the fix we discussed)
         pos = (float(state[0]), float(state[1]), float(state[2]))
-        
-        # 2. Update the robot position in the manager
         self.checker.update_position("robot", pos)
         
-        # 3. Use the manager's triangle-accurate check
-        # This replaces the manual 'for' loop and 'bounds' checks
-        return not self.checker.manager.in_collision_internal()
+        robot_mesh = self.checker.added_meshes["robot"]
+        robot_transform = self.checker.current_poses["robot"]
+        
+        for name, mesh in self.checker.added_meshes.items():
+            if name == "robot":
+                continue
+            transform = self.checker.current_poses[name]
+            temp = trimesh.collision.CollisionManager()
+            temp.add_object(name, mesh, transform)
+            if temp.in_collision_single(robot_mesh, robot_transform):
+                return False
+        return True
         
     
     def plan_path(self, 
@@ -191,92 +200,54 @@ class RRTPlanner3D:
 # replacing the existing visualize_path method entirely.
 
     def visualize_path(self, waypoints):
-        """Visualize obstacles, robot at each waypoint, and the path line."""
+        """Visualize obstacles with transparency and the path result."""
         import trimesh
         import numpy as np
 
         scene = trimesh.Scene()
 
-        # --- Obstacles -------------------------------------------------------
-        for i, mesh in enumerate(self.checker.meshes):
-            m = mesh.copy()
-            # Apply the stored world-space translation
-            pos = self.checker.positions[i]
-            if any(p != 0 for p in pos):
-                m.apply_translation(pos)
-            m.visual.face_colors = [100, 100, 220, 160]
-            scene.add_geometry(m, node_name=f"obstacle_{i}")
+        # --- Obstacles (The Case and Countershaft) ---------------------------
+        for name in self.checker.names:
+            if name == "robot":
+                continue
+                
+            mesh = self.checker.added_meshes[name].copy()
+            transform = self.checker.current_poses[name]
+            
+            # Apply Transparency/Colors based on the part name
+            if "Case" in name:
+                # Transparent Silver: R:200, G:200, B:200, Alpha:60
+                mesh.visual.face_colors = (200,200,200,60)
+            elif "Counter" in name or "secondary" in name:
+                # Solid Blue: R:50, G:50, B:255, Alpha:255
+                mesh.visual.face_colors = (50,50,255,255)
+            else:
+                mesh.visual.face_colors = (50,50,50,50)
 
-        # --- Robot at each waypoint (ghost trail) ----------------------------
+            scene.add_geometry(mesh, node_name=name, transform=transform)
+
+        # --- Path Visualization (The Moving Robot) ---------------------------
         if self.robot_mesh is not None and len(waypoints) > 0:
-            pts = np.array(waypoints)
-            n   = len(pts)
-
-            for idx, wp in enumerate(waypoints):
-                ghost = self.robot_mesh.copy()
-                ghost.apply_translation(wp)
-
-                # Fade from translucent at start to solid at end
-                alpha = int(40 + 200 * idx / max(n - 1, 1))
-                ghost.visual.face_colors = [220, 80, 80, alpha]
-                scene.add_geometry(ghost, node_name=f"robot_{idx}")
-
-            # Solid robot at goal
-            final = self.robot_mesh.copy()
-            final.apply_translation(waypoints[-1])
-            final.visual.face_colors = [220, 50, 50, 255]
-            scene.add_geometry(final, node_name="robot_final")
-
-            # Solid robot at start
+            # Show a Green "Ghost" at the start
             start_mesh = self.robot_mesh.copy()
-            start_mesh.apply_translation(waypoints[0])
-            start_mesh.visual.face_colors = [50, 200, 50, 255]
-            scene.add_geometry(start_mesh, node_name="robot_start")
+            start_transform = np.eye(4)
+            start_transform[:3, 3] = waypoints[0]
+            start_mesh.visual.face_colors = (0,255,0,100)# Semi-transparent green
+            scene.add_geometry(start_mesh, node_name="path_start", transform=start_transform)
 
-        # --- Path line -------------------------------------------------------
-        if len(waypoints) > 1:
-            pts = np.array(waypoints)
-            for i in range(len(pts) - 1):
-                seg_start = pts[i]
-                seg_end   = pts[i + 1]
-                direction  = seg_end - seg_start
-                length     = np.linalg.norm(direction)
-                if length < 1e-6:
-                    continue
+            # Show a Red "Ghost" at the goal
+            goal_mesh = self.robot_mesh.copy()
+            goal_transform = np.eye(4)
+            goal_transform[:3, 3] = waypoints[-1]
+            goal_mesh.visual.face_colors = (255,0,0,255)# Solid red
+            scene.add_geometry(goal_mesh, node_name="path_goal", transform=goal_transform)
 
-                cyl = trimesh.creation.cylinder(radius=1.5, height=length)
+            # Draw the path line (Orange)
+            path_points = np.array(waypoints)
+            path_line = trimesh.load_path(path_points)
+            scene.add_geometry(path_line)
 
-                # Orient cylinder along the segment
-                z     = np.array([0, 0, 1])
-                vec   = direction / length
-                cross = np.cross(z, vec)
-                cross_norm = np.linalg.norm(cross)
-                if cross_norm > 1e-6:
-                    axis  = cross / cross_norm
-                    angle = np.arccos(np.clip(np.dot(z, vec), -1, 1))
-                    R     = trimesh.transformations.rotation_matrix(angle, axis)
-                else:
-                    R = np.eye(4)
-
-                T = trimesh.transformations.translation_matrix(
-                    (seg_start + seg_end) / 2
-                )
-                cyl.apply_transform(T @ R)
-                cyl.visual.face_colors = [255, 200, 0, 255]
-                scene.add_geometry(cyl, node_name=f"path_seg_{i}")
-
-            # Start marker (green sphere)
-            s = trimesh.creation.icosphere(radius=4)
-            s.apply_translation(pts[0])
-            s.visual.face_colors = [0, 255, 0, 255]
-            scene.add_geometry(s, node_name="marker_start")
-
-            # Goal marker (red sphere)
-            g = trimesh.creation.icosphere(radius=4)
-            g.apply_translation(pts[-1])
-            g.visual.face_colors = [255, 0, 0, 255]
-            scene.add_geometry(g, node_name="marker_goal")
-
+        print("--- Rendering 3D Path Result ---")
         scene.show()
     
     def save_path(self, waypoints: List[np.ndarray], filename: str = 'planned_path.npy'):

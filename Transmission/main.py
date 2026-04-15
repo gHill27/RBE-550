@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from planner import RRTPlanner3D
 import numpy as np
-
+import trimesh
 # ---------------------------------------------------------------------------
 # Geometry constants (mm)
 # ---------------------------------------------------------------------------
@@ -19,14 +19,14 @@ SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
 
 # Apply the half-length offset to the START and GOAL
 # This centers the shaft mesh on the coordinate
-START = np.array([-350.0 + (PRIMARY_LENGTH / 2)+ 40, 0.0, BEARING_Z])
+START = np.array([-248 + (PRIMARY_LENGTH / 2), 0.0, BEARING_Z+1])
 GOAL  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z])
 
 
 def main():
     # 1. Define Search Space Bounds
     # x: [-400, 100], y: [-100, 100], z:
-    bounds = [(-400, 100), (-100, 100), (0, 300)]
+    bounds = [(-400, 400), (-400, 400), (-300, 300)]
     
     # 2. Initialize Planner
     planner = RRTPlanner3D(bounds=bounds, models_folder='models')
@@ -40,12 +40,14 @@ def main():
         position=(0, 0, 0),
         parameters={'part': 'case'}
     )
+    case_mesh = planner.checker.added_meshes['TransmissionCase']
+    case_mesh.visual.face_colors = (200,200,200,60)
     
     # Add the countershaft if it's already installed
     planner.checker.add_from_scad(
         'secondary_shaft.scad', 
         name='CounterShaft', 
-        position=(SECONDARY_LENGTH/2 + 20, 0, CS_BEARING_Z),
+        position=(SECONDARY_LENGTH/2 + 1, 0, CS_BEARING_Z),
         parameters={'part': 'countershaft'}
     )
 
@@ -56,31 +58,34 @@ def main():
         scad_file='primary_shaft.scad',
         start_position=START
     )
+
+
+    pos = tuple(START)
+    planner.checker.update_position("robot", pos)
+    robot_mesh = planner.checker.added_meshes["robot"]
+    robot_transform = planner.checker.current_poses["robot"]
+
+    for name, mesh in planner.checker.added_meshes.items():
+        if name == "robot":
+            continue
+        temp = trimesh.collision.CollisionManager()
+        temp.add_object(name, mesh, planner.checker.current_poses[name])
+        hit = temp.in_collision_single(robot_mesh, robot_transform)
+        print(f"  robot vs {name}: {'COLLISION' if hit else 'clear'}")
     
 
     print("\n--- Diagnostic Visualization ---")
     planner.checker.update_position("robot", START)
 
-    # return_names=True returns a set of frozensets/tuples
-    collisions = planner.checker.manager.in_collision_internal(return_names=True)
-
+    # Use the helper method from your CollisionChecker3D class
+    
+    collisions = planner.checker.check_all_collisions()
     if collisions:
-        print(f"🚨 START STATE COLLISION DETECTED")
-        # Check if 'collisions' is a collection of names or just a True/False
-        if isinstance(collisions, (set, list, frozenset)):
-            for pair in collisions:
-                pair_list = list(pair)
-                if len(pair_list) == 2:
-                    n1, n2 = pair_list
-                    dist = planner.checker.manager.min_distance_other(n1, n2)
-                    print(f"   -> {n1} ↔ {n2} | Distance: {dist:.4f}mm")
-        else:
-            # It's just a boolean True
-            print("   -> Collision exists, but trimesh didn't return specific names.")
+        print(f"🚨 Collisions at start: {collisions}")
     else:
-        print("✅ Start state is clear.")
-
+        print("✅ Start position clear.")
     planner.checker.visualize()
+
     # 5. Plan Path
     # The validity checker now uses manager.update_position("robot", state)
     print(f"\nPlanning from {START} to {GOAL}...")

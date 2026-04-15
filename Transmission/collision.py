@@ -45,9 +45,15 @@ class CollisionChecker3D:
         self.manager.set_transform(name, transform)
         self.current_poses[name] = transform
 
+    
     def check_collision(self, name1: str, name2: str) -> bool:
-        """Check if two specific meshes collide (triangle-accurate)"""
-        return self.manager.in_collision_other(name1, name2)
+        mesh1 = self.added_meshes[name1]
+        transform1 = self.current_poses[name1]
+        mesh2 = self.added_meshes[name2]
+        transform2 = self.current_poses[name2]
+        temp = trimesh.collision.CollisionManager()
+        temp.add_object(name2, mesh2, transform2)
+        return temp.in_collision_single(mesh1, transform1)
         
 
     def check_all_collisions(self) -> List[Tuple[str, str]]:
@@ -57,18 +63,12 @@ class CollisionChecker3D:
         return list(collisions)
 
     def get_collision_details(self, name1: str, name2: str) -> Dict:
-        """Get precise distance and penetration info"""
-        # min_distance_other returns the actual Euclidean distance between meshes
-        # If the meshes are intersecting, it may return 0 or a very small number
-        distance = self.manager.min_distance_other(name1, name2)
-        
+        temp = trimesh.collision.CollisionManager()
+        temp.add_object(name2, self.added_meshes[name2], self.current_poses[name2])
+        distance = self.manager.min_distance_other(temp)
         is_colliding = distance <= 0
-        
-        return {
-            'collision': is_colliding,
-            'distance': distance,
-            'meshes': (name1, name2)
-        }
+        return {'collision': is_colliding, 'distance': distance, 'meshes': (name1, name2)}
+
     
     def add_from_scad(self, scad_file: str, name: str = None,
                       position: Tuple[float, float, float] = (0, 0, 0),
@@ -100,3 +100,5 @@ class CollisionChecker3D:
         self.manager = trimesh.collision.CollisionManager()
         self.names.clear()
         self.meshes.clear()
+        self.added_meshes.clear()   
+        self.current_poses.clear()  
