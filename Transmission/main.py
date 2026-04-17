@@ -19,8 +19,8 @@ SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
 
 # Apply the half-length offset to the START and GOAL
 # This centers the shaft mesh on the coordinate
-START = np.array([-248 + (PRIMARY_LENGTH / 2), 0.0, BEARING_Z+1])
-GOAL  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z])
+GOAL = np.array([-148.0, 0.0, BEARING_Z+1])
+START  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z+1])
 
 
 def main():
@@ -58,21 +58,8 @@ def main():
         scad_file='primary_shaft.scad',
         start_position=START
     )
-
-
-    # pos = tuple(START)
-    # planner.checker.update_position("robot", pos)
-    # robot_mesh = planner.checker.added_meshes["robot"]
-    # robot_transform = planner.checker.current_poses["robot"]
-
-    # for name, mesh in planner.checker.added_meshes.items():
-    #     if name == "robot":
-    #         continue
-    #     temp = trimesh.collision.CollisionManager()
-    #     temp.add_object(name, mesh, planner.checker.current_poses[name])
-    #     hit = temp.in_collision_single(robot_mesh, robot_transform)
-    #     print(f"  robot vs {name}: {'COLLISION' if hit else 'clear'}")
-    
+    print("Robot mesh extents:", planner.robot_mesh.extents)
+    print("Robot bounds:", planner.robot_mesh.bounds)
 
     print("\n--- Diagnostic Visualization ---")
     # planner.checker.update_position("robot", START)
@@ -86,7 +73,7 @@ def main():
         print("✅ Start position clear.")
     robot_transform = np.eye(4)
     robot_transform[:3, 3] = START
-    planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
+    # planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
 
     # 5. Plan Path
     # The validity checker now uses manager.update_position("robot", state)
@@ -95,7 +82,7 @@ def main():
         start=START,
         goal=GOAL,
         planner_type='rrt_connect',
-        max_time= 10.0,
+        max_time= 15.0,
         goal_tolerance=5.0
     )
 
@@ -103,9 +90,12 @@ def main():
     if waypoints:
         print(f"✅ Success! Path found with {len(waypoints)} waypoints.")
         planner.save_path(waypoints, 'planned_path.npy')
-        
-        if input("\nVisualize result? (y/n): ").lower() == 'y':
-            planner.visualize_path(waypoints)
+        if True:
+        # if input("\nVisualize result? (y/n): ").lower() == 'y':
+            # planner.visualize_path(waypoints)
+            
+            planner.visualize_polyscope(waypoints)
+            # planner.plot_tree_matplotlib(waypoints)   # shows tree + path
     else:
         print("❌ No path found. Check if the start/goal are in collision.")
     
@@ -139,7 +129,7 @@ def run_diagnostic(planner, start_pos):
         print("✅ Start position is VALID and CLEAR.")
 
     print("Opening 3D visualizer... (Close window to proceed)")
-    planner.checker.visualize()
+    # planner.checker.visualize()
 
 
 if __name__ == "__main__":

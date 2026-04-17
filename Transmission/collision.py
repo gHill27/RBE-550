@@ -140,3 +140,19 @@ class CollisionChecker3D:
         self.meshes.clear()
         self.added_meshes.clear()   
         self.current_poses.clear()  
+    
+
+    @staticmethod
+    def quaternion_to_matrix(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
+        """Convert quaternion to 4x4 homogeneous rotation matrix."""
+        transform = np.eye(4)
+        transform[0, 0] = 1 - 2*(qy**2 + qz**2)
+        transform[0, 1] = 2*(qx*qy - qz*qw)
+        transform[0, 2] = 2*(qx*qz + qy*qw)
+        transform[1, 0] = 2*(qx*qy + qz*qw)
+        transform[1, 1] = 1 - 2*(qx**2 + qz**2)
+        transform[1, 2] = 2*(qy*qz - qx*qw)
+        transform[2, 0] = 2*(qx*qz - qy*qw)
+        transform[2, 1] = 2*(qy*qz + qx*qw)
+        transform[2, 2] = 1 - 2*(qx**2 + qy**2)
+        return transform
