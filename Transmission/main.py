@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from planner import RRTPlanner3D
 import numpy as np
 import trimesh
+import scipy.spatial.transform as sst
 # ---------------------------------------------------------------------------
 # Geometry constants (mm)
 # ---------------------------------------------------------------------------
@@ -19,14 +20,19 @@ SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
 
 # Apply the half-length offset to the START and GOAL
 # This centers the shaft mesh on the coordinate
-GOAL = np.array([-148.0, 0.0, BEARING_Z+1])
-START  = np.array([0.0 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z+1])
+START = np.array([83, 0.0, BEARING_Z+1])
+GOAL  = np.array([200 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z+1])
 
+def euler_to_quat(roll, pitch, yaw, degrees=True):
+    """Returns (qw, qx, qy, qz)."""
+    r = sst.Rotation.from_euler('xyz', [roll, pitch, yaw], degrees=degrees)
+    qx, qy, qz, qw = r.as_quat()  # scipy returns (x,y,z,w)
+    return (qw, qx, qy, qz)
 
 def main():
     # 1. Define Search Space Bounds
     # x: [-400, 100], y: [-100, 100], z:
-    bounds = [(-400, 400), (-400, 400), (-300, 300)]
+    bounds = [(-400, 400), (-400, 400), (0, 400)]
     
     # 2. Initialize Planner
     planner = RRTPlanner3D(bounds=bounds, models_folder='models')
@@ -73,17 +79,26 @@ def main():
         print("✅ Start position clear.")
     robot_transform = np.eye(4)
     robot_transform[:3, 3] = START
-    # planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
+
+
+    planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
 
     # 5. Plan Path
     # The validity checker now uses manager.update_position("robot", state)
+    # In main():
+    start_quat = euler_to_quat(0, 0, 0)       # identity — shaft along X at start
+    goal_quat  = euler_to_quat(0, 90, 0)      # 90° about Y — adjust to match your geometry
+
     print(f"\nPlanning from {START} to {GOAL}...")
+    
     waypoints = planner.plan_path(
         start=START,
         goal=GOAL,
-        planner_type='rrt_connect',
-        max_time= 15.0,
-        goal_tolerance=5.0
+        planner_type='rrt',
+        start_orientation=start_quat,
+        goal_orientation=goal_quat,
+        max_time = 500.0,
+        goal_tolerance=2.0
     )
 
     # 6. Result Handling

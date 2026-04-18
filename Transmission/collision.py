@@ -20,27 +20,37 @@ class CollisionChecker3D:
         self.added_meshes = {}
         self.current_poses = {}
 
-    def add_mesh(self, mesh: trimesh.Trimesh, name: str = None, 
-                 position: Tuple[float, float, float] = (0, 0, 0)):
-        """Add a mesh and register it with the CollisionManager"""
+    def add_mesh(self, mesh: trimesh.Trimesh, name: str = None,
+                position: Tuple[float, float, float] = (0, 0, 0),
+                quaternion: Tuple[float, float, float, float] = (1, 0, 0, 0)):
+        """Add a mesh and register it with the CollisionManager.
+        
+        Args:
+            quaternion: (qw, qx, qy, qz) orientation, defaults to identity
+        """
         name = name or f"Mesh_{len(self.names)}"
         
-        # Create a 4x4 transformation matrix for the manager
-        transform = np.eye(4)
+        qw, qx, qy, qz = quaternion
+        transform = self.quaternion_to_matrix(qw, qx, qy, qz)
         transform[:3, 3] = position
         
-        # Add to the manager (this builds the internal BVH tree)
         self.manager.add_object(name, mesh, transform=transform)
-        
         self.meshes.append(mesh)
         self.names.append(name)
         self.added_meshes[name] = mesh
         self.current_poses[name] = transform
-        # print(f"✓ Added '{name}' to CollisionManager at {position}")
 
-    def update_position(self, name: str, position: Tuple[float, float, float]):
-        """Efficiently move an existing mesh without re-adding it"""
-        transform = np.eye(4)
+    
+    def update_position(self, name: str,
+                        position: Tuple[float, float, float],
+                        quaternion: Tuple[float, float, float, float] = (1, 0, 0, 0)):
+        """Move and rotate an existing mesh without re-adding it.
+        
+        Args:
+            quaternion: (qw, qx, qy, qz) orientation, defaults to identity
+        """
+        qw, qx, qy, qz = quaternion
+        transform = self.quaternion_to_matrix(qw, qx, qy, qz)
         transform[:3, 3] = position
         self.manager.set_transform(name, transform)
         self.current_poses[name] = transform
