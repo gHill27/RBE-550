@@ -90,20 +90,24 @@ def main():
         planner_type='rrt',
         start_orientation=start_quat,
         goal_orientation=goal_quat,
-        max_time = 3000.0,
+        max_time = 500.0,
         goal_tolerance=2.0
     )
 
     # 6. Result Handling
     if waypoints:
-        print(f"✅ Success! Path found with {len(waypoints)} waypoints.")
         planner.save_path(waypoints, 'planned_path.npy')
-        if True:
-        # if input("\nVisualize result? (y/n): ").lower() == 'y':
-            # planner.visualize_path(waypoints)
-            
-            planner.visualize_polyscope(waypoints)
-            # planner.plot_tree_matplotlib(waypoints)   # shows tree + path
+
+        # 2D tree overview — try all three projections
+        planner.plot_tree_matplotlib(waypoints, projection='xz')  # side view
+        planner.plot_tree_matplotlib(waypoints, projection='xy')  # top view
+
+        # 3D static snapshot
+        planner.visualize_polyscope(waypoints)
+
+        # Animated traversal — 10 interpolation steps between waypoints
+        planner.animate_path_polyscope(waypoints, steps_between=10)
+
     else:
         print("❌ No path found. Check if the start/goal are in collision.")
     
