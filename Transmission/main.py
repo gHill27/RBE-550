@@ -21,7 +21,7 @@ SECONDARY_LENGTH = 330 # case_length (280) + 2*case_thickness (50)
 # Apply the half-length offset to the START and GOAL
 # This centers the shaft mesh on the coordinate
 START = np.array([83, 0.0, BEARING_Z+1])
-GOAL  = np.array([200 + (PRIMARY_LENGTH / 2),    0.0, BEARING_Z+1])
+GOAL  = np.array([-200 - (PRIMARY_LENGTH / 2),    0.0, BEARING_Z+1])
 
 def euler_to_quat(roll, pitch, yaw, degrees=True):
     """Returns (qw, qx, qy, qz)."""
@@ -32,7 +32,7 @@ def euler_to_quat(roll, pitch, yaw, degrees=True):
 def main():
     # 1. Define Search Space Bounds
     # x: [-400, 100], y: [-100, 100], z:
-    bounds = [(-400, 400), (-400, 400), (0, 400)]
+    bounds = [(-400, 300), (-200, 200), (0, 400)]
     
     # 2. Initialize Planner
     planner = RRTPlanner3D(bounds=bounds, models_folder='models')
@@ -70,18 +70,11 @@ def main():
     print("\n--- Diagnostic Visualization ---")
     # planner.checker.update_position("robot", START)
 
-    # Use the helper method from your CollisionChecker3D class
-    
-    collisions = planner.checker.check_all_collisions()
-    if collisions:
-        print(f"🚨 Collisions at start: {collisions}")
-    else:
-        print("✅ Start position clear.")
     robot_transform = np.eye(4)
     robot_transform[:3, 3] = START
 
 
-    planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
+    # planner.checker.visualize(robot_mesh=planner.robot_mesh, robot_transform= robot_transform)
 
     # 5. Plan Path
     # The validity checker now uses manager.update_position("robot", state)
@@ -97,7 +90,7 @@ def main():
         planner_type='rrt',
         start_orientation=start_quat,
         goal_orientation=goal_quat,
-        max_time = 500.0,
+        max_time = 3000.0,
         goal_tolerance=2.0
     )
 

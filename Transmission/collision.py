@@ -76,13 +76,11 @@ class CollisionChecker3D:
 
 
     def check_collision(self, name1: str, name2: str) -> bool:
+        """Use the persistent manager — never rebuild BVH."""
         mesh1 = self.added_meshes[name1]
         transform1 = self.current_poses[name1]
-        mesh2 = self.added_meshes[name2]
-        transform2 = self.current_poses[name2]
-        temp = trimesh.collision.CollisionManager()
-        temp.add_object(name2, mesh2, transform2)
-        return temp.in_collision_single(mesh1, transform1)
+        # Check name1 against the manager which already contains name2
+        return self.manager.in_collision_single(mesh1, transform1)
         
 
     def check_all_collisions(self) -> set:

@@ -90,7 +90,7 @@ class RRTPlanner3D:
         self.checker = CollisionChecker3D(models_folder=models_folder)
         self.robot_mesh = None
         self.robot_start = None
-        
+        self._transform_buffer = np.eye(4)
         # Setup OMPL state space (3D)
         # SE(3) state space = position (3) + rotation (quaternion)
         self.space = ob.SE3StateSpace()
@@ -102,7 +102,10 @@ class RRTPlanner3D:
             pos_bounds.setHigh(i, high)
         self.space.setBounds(pos_bounds)
 
+        self.space.setSubspaceWeight(0, 10.0)  # R3 translation subspace
+        self.space.setSubspaceWeight(1, 1.0)   # SO3 rotation subspace
         self.si = ob.SpaceInformation(self.space)
+
     
     def add_obstacle(self, scad_file: str, name: str, 
                      position: Tuple[float, float, float] = (0, 0, 0),
@@ -128,12 +131,16 @@ class RRTPlanner3D:
         self.robot_mesh = self.robot_mesh.copy()
         midpoint = (self.robot_mesh.bounds[0] + self.robot_mesh.bounds[1]) / 2
         self.robot_mesh.apply_translation(-midpoint)
-
-
-        center = self.robot_mesh.center_mass
-        print(f"Robot mesh center after centering: {center}")
-        print(f"Robot mesh bounds: {self.robot_mesh.bounds}")
-        self.si.setStateValidityCheckingResolution(0.01)
+        # face_count = len(self.robot_mesh.faces)
+        # if face_count > 300:
+        #     self.robot_mesh = self.robot_mesh.simplify_quadric_decimation(200)
+        #     print(f"Decimated robot: {face_count} → {len(self.robot_mesh.faces)} faces")
+            
+        #     # Verify decimation didn't corrupt the mesh
+        #     if not self.robot_mesh.is_watertight:
+        #         print("⚠ Decimated mesh not watertight — falling back to original")
+        #         self.robot_mesh = self.robot_mesh_visual.copy()
+        self.si.setStateValidityCheckingResolution(0.1)
 
         self.validity_checker = ShaftValidityChecker(self.si, self)
         self.si.setStateValidityChecker(self.validity_checker)
@@ -141,24 +148,22 @@ class RRTPlanner3D:
     
 
     def _is_state_valid(self, state) -> bool:
-        x = state.getX()
-        y = state.getY()
-        z = state.getZ()
-        
+        x, y, z = state.getX(), state.getY(), state.getZ()
         rot = state.rotation()
-        # Normalize quaternion defensively — OMPL can return
-        # slightly denormalized quaternions during interpolation
         q = np.array([rot.w, rot.x, rot.y, rot.z])
         norm = np.linalg.norm(q)
         if norm < 1e-6:
-            return False  # degenerate state, reject
+            return False
         q /= norm
         qw, qx, qy, qz = q
 
-        transform = self.checker.quaternion_to_matrix(qw, qx, qy, qz)
-        transform[:3, 3] = [x, y, z]
-        
-        return not self.checker.check_mesh_against_manager(self.robot_mesh, transform)
+        # Reuse pre-allocated transform buffer
+        T = self._transform_buffer
+        T[0,0]=1-2*(qy*qy+qz*qz); T[0,1]=2*(qx*qy-qz*qw); T[0,2]=2*(qx*qz+qy*qw)
+        T[1,0]=2*(qx*qy+qz*qw);   T[1,1]=1-2*(qx*qx+qz*qz); T[1,2]=2*(qy*qz-qx*qw)
+        T[2,0]=2*(qx*qz-qy*qw);   T[2,1]=2*(qy*qz+qx*qw); T[2,2]=1-2*(qx*qx+qy*qy)
+        T[0,3]=x; T[1,3]=y; T[2,3]=z
+        return not self.checker.check_mesh_against_manager(self.robot_mesh, T)
         
     
     def make_se3_state(self, pos, quat):
@@ -206,9 +211,9 @@ class RRTPlanner3D:
 
         se3_dist = self.si.distance(start_state, goal_state)
         xyz_dist = np.linalg.norm(np.array(goal[:3]) - np.array(start[:3]))
-        print(f"   SE3 distance start→goal: {se3_dist:.1f}")
-        print(f"   XYZ distance start→goal: {xyz_dist:.1f}mm")
-        print(f"   Goal tolerance: {goal_tolerance}mm (position only)")
+        # print(f"   SE3 distance start→goal: {se3_dist:.1f}")
+        # print(f"   XYZ distance start→goal: {xyz_dist:.1f}mm")
+        # print(f"   Goal tolerance: {goal_tolerance}mm (position only)")
 
 
         # Planner selection
@@ -225,7 +230,7 @@ class RRTPlanner3D:
             planner = og.RRTConnect(self.si)
 
         planner.setProblemDefinition(pdef)
-        planner.setRange(2.0)  # mm — proportional to your 800mm space
+        planner.setRange(20.0)  # mm — proportional to your 800mm space
 
         print(f"\n🚀 Planning with {planner_type.upper()}...")
         print(f"   Start: pos={start} quat={start_orientation}")
