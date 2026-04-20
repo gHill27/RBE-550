@@ -293,56 +293,59 @@ module shaft(length, radius) {
 }
  
 module gear(radius) {
-     color([1.0, 1.0, 1.0, 0.95])
-        linear_extrude(height = gear_thickness,
-                       twist = 15)
+    if (simplified) {
+        // Bounding cylinder — conservative outer bound, no teeth
+        color([1.0, 1.0, 1.0, 0.95])
+        cylinder(h = gear_thickness, r = radius);
+    } else {
+        color([1.0, 1.0, 1.0, 0.95])
+        linear_extrude(height = gear_thickness, twist = 15)
         gear_core_straight(100,
-                [0.9*radius,
-                 radius,
-                 radius,
-                 0.9*radius]);
+            [0.9*radius, radius, radius, 0.9*radius]);
+    }
 }
 
 module straight_gear(radius) {
-     color([1.0, 1.0, 1.0, 0.95])
+    if (simplified) {
+        color([1.0, 1.0, 1.0, 0.95])
+        cylinder(h = gear_thickness, r = radius);
+    } else {
+        color([1.0, 1.0, 1.0, 0.95])
         linear_extrude(height = gear_thickness)
-            gear_core_straight(100,
-                [0.9*radius,
-                 radius,
-                 radius,
-                 0.9*radius]);
-} 
-
-module gear_core_straight(num, radii) {
-  function r(a) = (floor(a / 10) % 2) ? 10 : 8;
-  polygon([for (i=[0:num-1], a=i*360/num, r=radii[i%len(radii)]) [ r*cos(a), r*sin(a) ]]);
-}
-
-
-module collar(radius) {
-    color([0.6, 0.6, 0.8, 0.85])
-    union() {
-        cylinder(h = 0.35 * collar_thickness,
-                 r1 = 0.9 * radius,
-                 r2 = radius);
-        translate([0, 0, 0.35 * collar_thickness])
-            cylinder(h = 0.3 * collar_thickness,
-                     r = 0.8 * radius);
-        translate([0, 0, 0.65 * collar_thickness])
-            cylinder(h = 0.35 * collar_thickness,
-                     r1 = radius,
-                     r2 = 0.9 * radius);
+        gear_core_straight(100,
+            [0.9*radius, radius, radius, 0.9*radius]);
     }
 }
 
 module syncro(radius) {
-    color("#c4ba21")
+    if (simplified) {
+        color("#c4ba21")
+        cylinder(h = syncro_thickness, r = radius);
+    } else {
+        color("#c4ba21")
         linear_extrude(height = syncro_thickness)
-            gear_core_straight(200,
-                [radius,
-                 0.95*radius,
-                 0.95*radius,
-                 radius]);
+        gear_core_straight(200,
+            [radius, 0.95*radius, 0.95*radius, radius]);
+    }
+}
+
+module collar(radius) {
+    if (simplified) {
+        // Single cylinder at max radius — conservative bound
+        color([0.6, 0.6, 0.8, 0.85])
+        cylinder(h = collar_thickness, r = radius);
+    } else {
+        color([0.6, 0.6, 0.8, 0.85])
+        union() {
+            cylinder(h = 0.35 * collar_thickness,
+                     r1 = 0.9 * radius, r2 = radius);
+            translate([0, 0, 0.35 * collar_thickness])
+                cylinder(h = 0.3 * collar_thickness, r = 0.8 * radius);
+            translate([0, 0, 0.65 * collar_thickness])
+                cylinder(h = 0.35 * collar_thickness,
+                         r1 = radius, r2 = 0.9 * radius);
+        }
+    }
 }
  
  

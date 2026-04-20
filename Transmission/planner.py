@@ -1,7 +1,29 @@
 #!/usr/bin/env python3
-"""
-ompl_planner.py - 3D RRT path planning with OpenSCAD obstacles
-"""
+# =============================================================================
+# planner.py
+# Worcester Polytechnic Institute — RBE-550 Motion Planning
+# RRT/BKPIECE SE3 Path Planner with Mesh-Based Collision Checking
+# =============================================================================
+# Authors:     Gavin Hill
+# Course:      RBE-550 Motion Planning
+# Instructor:  Daniel Montrallo Flickinger, PhD
+#
+# AI Assistance Disclosure:
+#   Portions of this file were developed with the assistance of Claude
+#   (Anthropic, claude.ai), an AI language model. AI assistance was used for:
+#     - SE3 state space setup and quaternion handling in OMPL bindings
+#     - Identification of Python/C++ boundary overhead in StateValidityChecker
+#       and recommendation to use callback form instead of class inheritance
+#     - Memory leak analysis of nanobind reference cycles (weakref pattern,
+#       cleanup() ordering, planner/pdef lifetime management)
+#     - ShaftPositionGoal goal region design for position-only tolerance
+#     - visualize_polyscope(), animate_path_polyscope(), and
+#       plot_tree_matplotlib() visualization functions
+#     - Performance optimizations: transform buffer reuse, subspace weights,
+#       per-subspace validity resolution, and mesh decimation strategy
+#   All AI-generated suggestions were reviewed, tested, and validated by
+#   the author. Final implementation decisions remain the author's own.
+# =============================================================================
 
 import numpy as np
 import trimesh
@@ -126,22 +148,20 @@ class RRTPlanner3D:
 
         self.robot_start = start_position
         self.robot_start_orientation = start_orientation
+        generator = MeshGenerator(models_folder=self.models_folder)
 
-        # Center the mesh along its longest axis before registering
+        # Full mesh for visualization
+        self.robot_mesh_visual = generator.from_scad(scad_file)
+        v_mid = (self.robot_mesh_visual.bounds[0] + self.robot_mesh_visual.bounds[1]) / 2
+        self.robot_mesh_visual = self.robot_mesh_visual.copy()
+        self.robot_mesh_visual.apply_translation(-v_mid)
+
+        # Simplified mesh for planning — $fn=12 gives a 12-sided polygon cylinder
+        # which is a conservative outer bound on the actual gear geometry
+        self.robot_mesh = generator.from_scad_simplified(scad_file, planning_segments=12)
         self.robot_mesh = self.robot_mesh.copy()
-        midpoint = (self.robot_mesh.bounds[0] + self.robot_mesh.bounds[1]) / 2
-        self.robot_mesh.apply_translation(-midpoint)
-        # face_count = len(self.robot_mesh.faces)
-        # if face_count > 300:
-        #     self.robot_mesh = self.robot_mesh.simplify_quadric_decimation(200)
-        #     print(f"Decimated robot: {face_count} → {len(self.robot_mesh.faces)} faces")
-            
-        #     # Verify decimation didn't corrupt the mesh
-        #     if not self.robot_mesh.is_watertight:
-        #         print("⚠ Decimated mesh not watertight — falling back to original")
-        #         self.robot_mesh = self.robot_mesh_visual.copy()
-        # self.si.setStateValidityCheckingResolution(0.1)
-
+        p_mid = (self.robot_mesh.bounds[0] + self.robot_mesh.bounds[1]) / 2
+        self.robot_mesh.apply_translation(-p_mid)
 
         planner_ref = weakref.ref(self)
         def validity_fn(state):

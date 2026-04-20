@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+# =============================================================================
+# main.py
+# Worcester Polytechnic Institute — RBE-550 Motion Planning
+# SM-465 Transmission Primary Shaft Assembly Planner
+# =============================================================================
+# Authors:     Gavin Hill
+# Course:      RBE-550 Motion Planning
+# Instructor:  Daniel Montrallo Flickinger, PhD
+#
+# AI Assistance Disclosure:
+#   Portions of this file were developed with the assistance of Claude
+#   (Anthropic, claude.ai), an AI language model. AI assistance was used for:
+#     - Debugging and identifying logic errors in START/GOAL geometry
+#     - Suggestions for OMPL planner parameter tuning
+#     - Code structure and organization recommendations
+#   All AI-generated suggestions were reviewed, tested, and validated by
+#   the author. Final implementation decisions remain the author's own.
+# =============================================================================
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -44,17 +62,22 @@ def main():
         'transmission_case.scad', 
         name='TransmissionCase', 
         position=(0, 0, 0),
-        parameters={'part': 'case'}
+        parameters={
+        'part': 'countershaft',
+        'simplified': 'true',
+        '$fn': 16
+    }
     )
     case_mesh = planner.checker.added_meshes['TransmissionCase']
     case_mesh.visual.face_colors = (200,200,200,60)
     
     # Add the countershaft if it's already installed
-    planner.checker.add_from_scad(
+    planner.checker.add_from_scad_simplified(
         'secondary_shaft.scad', 
         name='CounterShaft', 
         position=(SECONDARY_LENGTH/2 + 1, 0, CS_BEARING_Z),
-        parameters={'part': 'countershaft'}
+        parameters={'part': 'countershaft'},
+        planning_segments=16
     )
 
     # 4. Set the Robot (The Primary Shaft)
@@ -63,6 +86,7 @@ def main():
     planner.set_robot(
         scad_file='primary_shaft.scad',
         start_position=START
+        
     )
     print("Robot mesh extents:", planner.robot_mesh.extents)
     print("Robot bounds:", planner.robot_mesh.bounds)
@@ -90,7 +114,7 @@ def main():
         planner_type='rrt',
         start_orientation=start_quat,
         goal_orientation=goal_quat,
-        max_time = 500.0,
+        max_time = 1000.0,
         goal_tolerance=2.0
     )
 

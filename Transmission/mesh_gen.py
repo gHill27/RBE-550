@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
-"""
-mesh_generator.py - Convert OpenSCAD files to 3D trimesh meshes
-"""
+# =============================================================================
+# mesh_gen.py
+# Worcester Polytechnic Institute — RBE-550 Motion Planning
+# OpenSCAD-to-Trimesh Mesh Generator
+# =============================================================================
+# Authors:     Gavin Hill
+# Course:      RBE-550 Motion Planning
+# Instructor:  Daniel Montrallo Flickinger, PhD
+#
+# AI Assistance Disclosure:
+#   Portions of this file were developed with the assistance of Claude
+#   (Anthropic, claude.ai), an AI language model. AI assistance was used for:
+#     - from_scad_simplified() method design using OpenSCAD -D flag injection
+#       to pass simplified=true and $fn overrides at render time
+#     - Mesh cache implementation to avoid redundant OpenSCAD subprocess calls
+#     - Scene concatenation handling for multi-body SCAD exports
+#   All AI-generated suggestions were reviewed, tested, and validated by
+#   the author. Final implementation decisions remain the author's own.
+# =============================================================================
+
 import subprocess
 import trimesh
 import trimesh.repair
@@ -168,3 +185,29 @@ class MeshGenerator:
                 'extents': [0,0,0],
                 'center_of_mass': [0,0,0],
             }
+        
+
+    def from_scad_simplified(
+                                self,
+                                scad_file: str,
+                                parameters: Optional[Dict] = None,
+                                planning_segments: int = 16,  # low-poly cylinder approximation
+                                fix_mesh: bool = False,
+                            ) -> trimesh.Trimesh:
+        """
+        Generate a simplified mesh for collision planning by overriding
+        OpenSCAD's $fn variable to reduce gear tooth polygon count,
+        and optionally suppressing teeth entirely via a 'simplified' flag.
+
+        $fn controls the number of fragments in circular shapes — 
+        default is often 100+, we drop it to 16 for planning.
+        """
+        planning_params = dict(parameters or {})
+        
+        # Override circular resolution — turns gear teeth into low-poly cylinders
+        planning_params['$fn'] = planning_segments
+        
+        # If your SCAD file supports a 'simplified' flag to skip teeth geometry:
+        planning_params['simplified'] = 'true'
+
+        return self.from_scad(scad_file, parameters=planning_params, fix_mesh=fix_mesh)

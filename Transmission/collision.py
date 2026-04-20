@@ -1,7 +1,26 @@
 #!/usr/bin/env python3
-"""
-collision_checker.py - 3D collision detection for meshes
-"""
+# =============================================================================
+# collision.py
+# Worcester Polytechnic Institute — RBE-550 Motion Planning
+# 3D Mesh Collision Detection via trimesh CollisionManager
+# =============================================================================
+# Authors:     Gavin Hill
+# Course:      RBE-550 Motion Planning
+# Instructor:  Daniel Montrallo Flickinger, PhD
+#
+# AI Assistance Disclosure:
+#   Portions of this file were developed with the assistance of Claude
+#   (Anthropic, claude.ai), an AI language model. AI assistance was used for:
+#     - Identification of BVH rebuild bug in check_collision() where a new
+#       CollisionManager was incorrectly instantiated on every call
+#     - Recommendation to split obstacle-only and diagnostic managers to
+#       prevent self-collision false positives
+#     - quaternion_to_matrix() implementation and integration with
+#       trimesh's collision transform interface
+#     - add_from_scad_simplified() method for planning mesh generation
+#   All AI-generated suggestions were reviewed, tested, and validated by
+#   the author. Final implementation decisions remain the author's own.
+# =============================================================================
 
 import numpy as np
 import trimesh
@@ -130,6 +149,19 @@ class CollisionChecker3D:
         except Exception as e:
             print(f"❌ Failed to load {scad_file}: {e}")
             raise
+
+    def add_from_scad_simplified(self, scad_file: str, name: str = None,
+                              position: Tuple[float, float, float] = (0, 0, 0),
+                              parameters: Dict = None,
+                              planning_segments: int = 16,
+                              fix_mesh: bool = False):
+        """Load a simplified mesh for collision checking — suppresses gear teeth
+        and uses low-poly cylinders via simplified=true and $fn override."""
+        simplified_params = dict(parameters or {})
+        simplified_params['simplified'] = 'true'
+        simplified_params['$fn'] = planning_segments
+        self.add_from_scad(scad_file, name, position,
+                        simplified_params, fix_mesh)
     
     def visualize(self, robot_mesh: trimesh.Trimesh = None,
               robot_transform: np.ndarray = None):
